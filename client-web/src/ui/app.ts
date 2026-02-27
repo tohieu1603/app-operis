@@ -1627,9 +1627,10 @@ export class OperisApp extends LitElement {
     try {
       let order;
       if (this.billingPaymentMode === "amount") {
-        const amount = Number(this.billingCustomAmount);
-        if (!amount || amount <= 0) return;
-        order = await createDeposit({ amount });
+        const amountVnd = Number(this.billingCustomAmount);
+        if (!amountVnd || amountVnd <= 0) return;
+        // Send VND directly — backend converts to tokens using its own rate
+        order = await createDeposit({ amountVnd });
       } else {
         const tier = this.billingPricingTiers[this.billingSelectedPackage];
         if (!tier) return;
