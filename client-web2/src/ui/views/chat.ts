@@ -1926,10 +1926,7 @@ export function renderChat(props: ChatProps) {
                       }}
                       @keydown=${handleKeyDown}
                       @paste=${handlePaste}
-<<<<<<< HEAD
                       ?disabled=${sending || !gatewayReady}
-=======
->>>>>>> dev
                     ></textarea>
                     ${
                       pendingImages.length > 0
