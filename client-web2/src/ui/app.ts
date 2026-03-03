@@ -44,12 +44,7 @@ import {
   type ChannelStatus,
   type ChannelId,
 } from "./channels-api";
-import {
-  getConversations,
-  getConversationHistory,
-  deleteConversation,
-  type Conversation,
-} from "./chat-api";
+import { getConversations, deleteConversation, type Conversation } from "./chat-api";
 import { showConfirm } from "./components/operis-confirm";
 import { showToast } from "./components/operis-toast";
 import {
@@ -183,7 +178,6 @@ export class OperisApp extends LitElement {
   @state() chatSending = false;
   @state() chatConversationId: string | null = null;
   @state() chatError: string | null = null;
-  @state() chatHistoryLoaded = false;
   @state() chatInitializing = true;
   // Streaming state
   @state() chatStreamingText = "";
@@ -200,6 +194,8 @@ export class OperisApp extends LitElement {
   @state() chatPendingImages: PendingImage[] = [];
   // Session token tracking
   @state() chatSessionTokens = 0;
+  // Thinking level from gateway session (off | low | medium | high)
+  @state() chatThinkingLevel: string | null = null;
   @state() chatTokenBalance = 0;
   // Current chat run ID for abort
   private chatRunId: string | null = null;
@@ -744,38 +740,23 @@ export class OperisApp extends LitElement {
   }
 
   private handleChatStreamEvent(evt: ChatStreamEvent) {
-    // Skip if using SSE streaming
-    if (this.chatStreamingRunId === "sse-stream") return;
-
-    // Cross-run final: different run finished (e.g. sub-agent). Refresh history.
-    // (Original: handleChatEvent returns "final" for cross-run finals → resets + refreshes)
-    if (evt.runId && this.chatRunId && evt.runId !== this.chatRunId) {
-      if (evt.state === "final") {
-        this.loadChatMessagesFromGateway();
-        this.loadChatHistory();
-      }
-      return;
-    }
+    // Guard: only process events when actively sending via WS (like original client-web)
+    // SSE streaming sets chatStreamingRunId = "sse-stream", skip WS events in that case
+    if (!this.chatSending || this.chatStreamingRunId === "sse-stream") return;
 
     if (evt.state === "delta" && evt.message?.content) {
-      // Accept deltas when we have an active run OR are in sending state
-      // (Original accepts deltas as long as sessionKey matches — no chatSending check)
+      // Extract text from content blocks (same as original)
       const text = evt.message.content
         .filter((block) => block.type === "text" && block.text)
         .map((block) => block.text)
         .join("");
-      if (!this.chatStreamingText || text.length >= this.chatStreamingText.length) {
-        this.chatStreamingText = text;
-      }
-      // Track the run if we weren't already
-      if (!this.chatRunId && evt.runId) {
-        this.chatRunId = evt.runId;
-        this.chatSending = true;
-      }
+
+      this.chatStreamingText = text;
       this.chatStreamingRunId = evt.runId;
     } else if (evt.state === "final") {
       this.handleChatFinal(evt);
     } else if (evt.state === "aborted") {
+      // Run was aborted (e.g. superseded by new message) — clear state and flush queue
       this.chatRunId = null;
       this.chatStreamingText = "";
       this.chatStreamingRunId = null;
@@ -793,6 +774,7 @@ export class OperisApp extends LitElement {
       this.chatStreamingRunId = null;
       this.chatToolCalls = [];
       this.chatSending = false;
+      this.flushChatQueue();
     }
   }
 
@@ -1026,9 +1008,7 @@ export class OperisApp extends LitElement {
 
   private loadTabData(tab: string) {
     if (tab === "chat") {
-      // Load sidebar conversation list (don't let it control chatInitializing — gateway load does that)
-      this.loadChatHistory();
-      // Load current session messages from gateway (like original refreshActiveTab → loadChatHistory)
+      // Load current session messages from gateway (source of truth)
       this.loadChatMessagesFromGateway(true).then(() => this.scrollChatToBottom());
       // Load available sessions for the session selector dropdown
       this.loadGatewaySessions();
@@ -1067,7 +1047,6 @@ export class OperisApp extends LitElement {
     this.chatConversationId = null;
     this.chatSessionTokens = 0;
     this.chatTokenBalance = 0;
-    this.chatHistoryLoaded = false;
     this.chatInitializing = false;
     // Reset settings
     this.applySettings({
@@ -1156,25 +1135,6 @@ export class OperisApp extends LitElement {
     this.syncSessionUrl();
 
     this.loadTabData(tab);
-  }
-
-  private async loadChatHistory() {
-    // Skip if not logged in or already loaded
-    if (!this.settings.isLoggedIn || this.chatHistoryLoaded) {
-      return;
-    }
-
-    try {
-      // Load sidebar conversation list only (chatInitializing managed by loadChatMessagesFromGateway)
-      const { conversations } = await getConversations();
-      conversations.sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-      );
-      this.chatConversations = conversations;
-      this.chatHistoryLoaded = true;
-    } catch (err) {
-      console.error("[chat] Failed to load history:", err);
-    }
   }
 
   /** Load available sessions from gateway for session selector dropdown */
@@ -1347,7 +1307,6 @@ export class OperisApp extends LitElement {
       }
       // Reset chat state for fresh load
       this.chatInitializing = true;
-      this.chatHistoryLoaded = false;
       this.setTab("chat");
     } catch (err) {
       this.loginError = err instanceof Error ? err.message : "Đăng nhập thất bại";
@@ -1451,6 +1410,7 @@ export class OperisApp extends LitElement {
           message: userMessage,
           deliver: false,
           idempotencyKey: runId,
+          ...(this.chatThinkingLevel ? { thinking: this.chatThinkingLevel } : {}),
           ...(images?.length
             ? {
                 attachments: images.map((img) => ({
@@ -1573,17 +1533,12 @@ export class OperisApp extends LitElement {
 
   /**
    * Load chat messages from gateway WS `chat.history` — source of truth.
-   * On initial load: show cache instantly while gateway loads in background.
-   * Gateway always wins once it responds.
+   * On initial load: show cache instantly as placeholder, then gateway replaces.
    */
   private async loadChatMessagesFromGateway(isInitialLoad = false) {
-    // On initial load: use localStorage cache (shared across tabs) if available.
-    // Gateway chat.history may lag behind (messages not yet persisted) — cache is
-    // written after every send/receive so it's typically more up-to-date.
-    // User can click refresh to force-reload from gateway.
-    if (isInitialLoad && this.restoreCachedMessages()) {
-      this.chatInitializing = false;
-      return;
+    // Show cache as placeholder while gateway loads (instant UI, no blank screen)
+    if (isInitialLoad) {
+      this.restoreCachedMessages();
     }
 
     try {
@@ -1592,6 +1547,7 @@ export class OperisApp extends LitElement {
       const res = await gw.request<{
         messages?: Array<Record<string, unknown>>;
         thinkingLevel?: string;
+        sessionId?: string;
       }>("chat.history", { sessionKey, limit: 200 });
 
       const rawMessages = Array.isArray(res.messages) ? res.messages : [];
@@ -1616,6 +1572,10 @@ export class OperisApp extends LitElement {
 
       // Gateway is source of truth — always replace local state
       this.chatMessages = parsed;
+      // Store thinking level from session (used in chat.send)
+      if (typeof res.thinkingLevel === "string") {
+        this.chatThinkingLevel = res.thinkingLevel;
+      }
       this.cacheChatMessages();
     } catch (err) {
       console.warn("[chat] Failed to load messages from gateway:", err);
@@ -1636,12 +1596,11 @@ export class OperisApp extends LitElement {
     this.chatStreamingRunId = null;
     this.chatToolCalls = [];
 
-    // Load messages from gateway WS (like original UI's chat.history)
+    // Load messages from gateway WS (source of truth)
     await this.loadChatMessagesFromGateway();
 
-    // Also reload sidebar conversations
-    this.chatHistoryLoaded = false;
-    await this.loadChatHistory();
+    // Reload session selector
+    this.loadGatewaySessions();
     this.scrollChatToBottom();
   }
 
@@ -1655,23 +1614,9 @@ export class OperisApp extends LitElement {
     this.chatSessionTokens = 0;
     this.chatError = null;
 
-    try {
-      const { messages, usage } = await getConversationHistory(conversationId);
-      this.chatMessages = messages.map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-        timestamp: m.created_at ? new Date(m.created_at) : undefined,
-      }));
-      if (usage?.total_tokens) {
-        this.chatSessionTokens = usage.total_tokens;
-      }
-      this.scrollChatToBottom();
-    } catch (err) {
-      console.error("[chat] Failed to load conversation:", err);
-      this.chatError = "Không thể tải hội thoại";
-    } finally {
-      this.chatInitializing = false;
-    }
+    // Use gateway chat.history (source of truth) instead of REST API
+    await this.loadChatMessagesFromGateway(true);
+    this.scrollChatToBottom();
   }
 
   private async handleDeleteConversation(conversationId: string) {
@@ -2020,7 +1965,6 @@ export class OperisApp extends LitElement {
     // Navigate to chat with this conversation
     if (log.type === "chat") {
       this.chatConversationId = log.id;
-      this.chatHistoryLoaded = false; // Force reload
       this.setTab("chat");
     }
   }
