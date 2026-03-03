@@ -46,6 +46,20 @@ Var DataDirBrowseBtn
   Function dataDirPageLeave
     ; Read final value from input (user may have typed manually)
     ${NSD_GetText} $DataDirInput $DataDir
+
+    ; Strip trailing backslash for consistent comparison
+    StrCpy $R0 $DataDir "" -1
+    ${If} $R0 == "\"
+      StrLen $R0 $DataDir
+      IntOp $R0 $R0 - 1
+      StrCpy $DataDir $DataDir $R0
+    ${EndIf}
+
+    ; Always ensure path ends with \OperisAgent
+    StrCpy $R0 $DataDir "" -12  ; last 12 chars = "\OperisAgent"
+    ${If} $R0 != "\OperisAgent"
+      StrCpy $DataDir "$DataDir\OperisAgent"
+    ${EndIf}
   FunctionEnd
 
   Function onBrowseDataDir

@@ -3,7 +3,7 @@
  * Creates minimal gateway config on first run; ensures Electron-specific
  * settings on every startup.
  *
- * BytePlus provider preset is always bundled and deep-merged on first run.
+ * Operis provider preset is always bundled and deep-merged on first run.
  */
 import path from "node:path";
 import fs from "node:fs";
@@ -72,7 +72,7 @@ export class OnboardManager {
         port: 18789,
         bind: "loopback",
         http: { endpoints: { chatCompletions: { enabled: true } } },
-        controlUi: { enabled: false, allowedOrigins: ["file://"] },
+        controlUi: { enabled: true, allowedOrigins: ["file://"] },
       },
       hooks: { enabled: true, token: hooksToken },
       auth: { profiles: {} },
@@ -205,8 +205,8 @@ export class OnboardManager {
 
       // Disable control UI served by gateway (Electron loads UI from local file://)
       config.gateway.controlUi ??= {};
-      if (config.gateway.controlUi.enabled !== false) {
-        config.gateway.controlUi.enabled = false;
+      if (config.gateway.controlUi.enabled !== true) {
+        config.gateway.controlUi.enabled = true;
         modified = true;
       }
       const origins = config.gateway.controlUi.allowedOrigins ?? [];

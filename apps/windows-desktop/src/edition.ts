@@ -1,7 +1,7 @@
 /**
  * Resource and config path helpers for Agent Operis Desktop.
  *
- * BytePlus provider preset is always bundled and applied on first run.
+ * Operis provider preset is always bundled and applied on first run.
  * State directory is always ~/.operis.
  */
 import { app } from "electron";
@@ -20,7 +20,7 @@ export function resolveResourcePath(...segments: string[]): string {
 
 /** Resolve the preset config file path (or null if not bundled) */
 export function resolvePresetPath(): string | null {
-  const presetPath = resolveResourcePath("config-preset-byteplus.json");
+  const presetPath = resolveResourcePath("config-preset-operis.json");
   return fs.existsSync(presetPath) ? presetPath : null;
 }
 
