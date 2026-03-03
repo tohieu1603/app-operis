@@ -1,10 +1,23 @@
 import dotenv from "dotenv";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(here, "..");
+
+/** Read gateway token from ~/.operis/operis.json (single source of truth) */
+function readOperisToken(): string {
+  try {
+    const raw = readFileSync(path.join(homedir(), ".operis", "operis.json"), "utf-8");
+    const cfg = JSON.parse(raw);
+    return cfg?.gateway?.auth?.token ?? "";
+  } catch {
+    return "";
+  }
+}
 
 // Load .env from root directory (fallback to client-web/.env)
 dotenv.config({ path: path.resolve(rootDir, ".env") });
@@ -23,8 +36,8 @@ export default defineConfig(() => {
   const envBase = process.env.CLIENT_WEB_BASE_PATH?.trim();
   const base = envBase ? normalizeBase(envBase) : "./";
 
-  // Map root GATEWAY_TOKEN to VITE_GATEWAY_TOKEN for client
-  const gatewayToken = process.env.VITE_GATEWAY_TOKEN || process.env.GATEWAY_TOKEN || "";
+  // Gateway token: read from operis.json only
+  const gatewayToken = readOperisToken();
   const port = parseInt(process.env.CLIENT_WEB_PORT || "5173", 10);
   const apiTarget = process.env.CLIENT_WEB_API_TARGET || "http://127.0.0.1:18789";
 

@@ -448,6 +448,9 @@ export class OperisApp extends LitElement {
   @state() reportForm: ReportFormState = { type: "bug", subject: "", content: "" };
   @state() reportSubmitting = false;
 
+  // Gateway status (Electron only)
+  @state() gatewayStatus: "unknown" | "stopped" | "starting" | "running" | "error" = "unknown";
+
   private themeMedia: MediaQueryList | null = null;
   private themeMediaHandler: ((event: MediaQueryListEvent) => void) | null = null;
   private popStateHandler = () => this.handlePopState();
@@ -459,6 +462,7 @@ export class OperisApp extends LitElement {
   private chatStreamUnsubscribe: (() => void) | null = null;
   private toolEventUnsubscribe: (() => void) | null = null;
   private reconnectUnsubscribe: (() => void) | null = null;
+  private gatewayStatusUnsubscribe: (() => void) | null = null;
 
   createRenderRoot() {
     return this;
@@ -469,6 +473,15 @@ export class OperisApp extends LitElement {
     // Clean up legacy localStorage tokens (now using HttpOnly cookies)
     localStorage.removeItem("operis_accessToken");
     localStorage.removeItem("operis_refreshToken");
+
+    // Subscribe to gateway status (Electron only)
+    if (window.electronAPI?.onGatewayStatus) {
+      this.gatewayStatusUnsubscribe = window.electronAPI.onGatewayStatus((status) => {
+        this.gatewayStatus = status as typeof this.gatewayStatus;
+      });
+    } else {
+      this.gatewayStatus = "running"; // Not Electron — assume running
+    }
 
     // Initialize theme
     this.themeResolved = resolveTheme(this.theme);
@@ -1218,6 +1231,7 @@ export class OperisApp extends LitElement {
     if (this.sessionExpiredHandler) {
       window.removeEventListener("auth:session-expired", this.sessionExpiredHandler);
     }
+    this.gatewayStatusUnsubscribe?.();
     this.stopGatewayServices();
     this.stopBillingCountdown();
     if (this.progressTimer) {
@@ -1568,6 +1582,9 @@ export class OperisApp extends LitElement {
     await this.scrollChatToBottom();
 
     try {
+      // Send via gateway WebSocket directly (bypasses operis-api chat/stream).
+      // Token deduction still works: gateway → operis provider → operis-api proxy.
+      // Streaming response arrives via WS "chat" events → handleChatStreamEvent().
       const gw = await waitForConnection(5000);
       const runId = crypto.randomUUID();
       this.chatRunId = runId;
@@ -3536,6 +3553,7 @@ export class OperisApp extends LitElement {
           streamingText: this.chatStreamingText,
           toolCalls: this.chatToolCalls,
           pendingImages: this.chatPendingImages,
+          gatewayReady: this.gatewayStatus === "running" || this.gatewayStatus === "unknown",
           onDraftChange: (value) => (this.chatDraft = value),
           onSend: () => this.handleSendMessage(),
           onStop: () => this.handleStopChat(),
@@ -4058,6 +4076,21 @@ export class OperisApp extends LitElement {
               `
               : nothing
           }
+
+          ${this.settings.isLoggedIn && this.gatewayStatus !== "running" && this.gatewayStatus !== "unknown"
+            ? html`
+              <div class="gw-banner gw-banner--${this.gatewayStatus}">
+                <span class="gw-banner__icon">
+                  ${this.gatewayStatus === "error" ? "\u26A0" : "\u27F3"}
+                </span>
+                <span class="gw-banner__text">
+                  ${this.gatewayStatus === "starting" ? "Đang khởi động gateway..."
+                    : this.gatewayStatus === "stopped" ? "Gateway đã dừng"
+                    : this.gatewayStatus === "error" ? "Lỗi khởi động gateway"
+                    : "Đang kết nối..."}
+                </span>
+              </div>`
+            : nothing}
 
           ${this.renderContent()}
         </main>

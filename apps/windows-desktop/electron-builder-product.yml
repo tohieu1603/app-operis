@@ -3,7 +3,7 @@ productName: Agent Operis
 copyright: Copyright (c) 2026 Agent Operis
 
 directories:
-  output: release
+  output: release-product
   buildResources: resources
 
 asar: true
@@ -35,36 +35,28 @@ nsis:
   include: installer.nsh
 
 extraResources:
-  # Gateway: esbuild-bundled entry + native modules (node_modules/)
   - from: "dist-gateway/"
     to: "gateway/"
     filter:
       - "**/*"
       - "!**/*.map"
-  # ESM package.json for gateway
   - from: "resources/gateway-package.json"
     to: "gateway/package.json"
-  # Client-web UI build (must be "control-ui" so gateway resolveControlUiRootSync finds it)
   - from: "../../dist/control-ui"
     to: "control-ui"
     filter:
       - "**/*"
       - "!**/*.map"
-  # Cloudflare tunnel binary
   - from: "resources/cloudflared.exe"
     to: "cloudflared.exe"
-  # First-run setup page
   - from: "resources/setup.html"
     to: "setup.html"
-  # jiti babel.cjs for loading .ts extensions at runtime
   - from: "resources/jiti-babel.cjs"
     to: "dist/babel.cjs"
-  # Built-in plugins (pre-compiled, renamed to .ts for upgrade compat)
   - from: "dist-extensions"
     to: "extensions"
     filter:
       - "**/*"
-  # Tray status icons
   - from: "resources/tray-green.ico"
     to: "tray-green.ico"
   - from: "resources/tray-yellow.ico"
@@ -73,15 +65,12 @@ extraResources:
     to: "tray-red.ico"
   - from: "resources/tray-gray.ico"
     to: "tray-gray.ico"
-  # Operis config preset (provider/model defaults applied on first run)
   - from: "resources/config-preset-operis.json"
     to: "config-preset-operis.json"
-  # App window icon
   - from: "resources/icon.ico"
     to: "icon.ico"
 
 extraFiles:
-  # Workspace templates at app root
   - from: "../../docs/reference/templates"
     to: "docs/reference/templates"
     filter:
