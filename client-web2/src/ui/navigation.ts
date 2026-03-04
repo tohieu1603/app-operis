@@ -41,7 +41,7 @@ export const NAV_ITEMS: Array<{
     tab: "sessions",
     label: "Nhật ký",
     icon: "scrollText",
-    description: "Inspect active sessions and adjust per-session defaults.",
+    description: "Xem và quản lý các phiên hoạt động.",
     section: "main",
   },
   {
@@ -53,9 +53,9 @@ export const NAV_ITEMS: Array<{
   },
   {
     tab: "workflow",
-    label: "Workflow",
+    label: "Việc định kỳ",
     icon: "workflow",
-    description: "Automate tasks with workflows",
+    description: "Tự động hóa các tác vụ định kỳ",
     section: "main",
   },
   {
@@ -75,23 +75,16 @@ export const NAV_ITEMS: Array<{
   // Agent section
   {
     tab: "agents",
-    label: "Agents",
+    label: "Nhân viên",
     icon: "folder",
-    description: "Quản lý agents và workspace",
+    description: "Quản lý nhân viên và workspace",
     section: "agent",
   },
   {
     tab: "skills",
-    label: "Skills",
+    label: "Kĩ năng",
     icon: "zap",
-    description: "Quản lý skills và cài đặt",
-    section: "agent",
-  },
-  {
-    tab: "nodes",
-    label: "Nodes",
-    icon: "cpu",
-    description: "Thiết bị và node kết nối",
+    description: "Quản lý kĩ năng và cài đặt",
     section: "agent",
   },
   // Account section

@@ -41,7 +41,7 @@ export type CronEvent = {
     cacheWrite?: number;
     totalTokens?: number;
   };
-  /** Model used for the agent run (e.g. "byteplus/kimi-k2.5"). */
+  /** Model used for the agent run (e.g. "operis/operis-multi"). */
   model?: string;
 };
 
