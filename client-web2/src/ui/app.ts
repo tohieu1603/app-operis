@@ -1437,6 +1437,12 @@ export class OperisApp extends LitElement {
 
     // Reveal messages after scroll is positioned
     messagesEl.style.visibility = "";
+
+    // Auto-focus the chat input
+    const input = this.renderRoot.querySelector(
+      ".gc-input-bottom .gc-input",
+    ) as HTMLTextAreaElement;
+    input?.focus();
   }
 
   private setTheme(mode: ThemeMode, context?: ThemeTransitionContext) {
@@ -4078,20 +4084,29 @@ export class OperisApp extends LitElement {
               : nothing
           }
 
-          ${this.settings.isLoggedIn && this.gatewayStatus !== "running" && this.gatewayStatus !== "unknown"
-            ? html`
+          ${
+            this.settings.isLoggedIn &&
+            this.gatewayStatus !== "running" &&
+            this.gatewayStatus !== "unknown"
+              ? html`
               <div class="gw-banner gw-banner--${this.gatewayStatus}">
                 <span class="gw-banner__icon">
                   ${this.gatewayStatus === "error" ? "\u26A0" : "\u27F3"}
                 </span>
                 <span class="gw-banner__text">
-                  ${this.gatewayStatus === "starting" ? "Đang khởi động gateway..."
-                    : this.gatewayStatus === "stopped" ? "Gateway đã dừng"
-                    : this.gatewayStatus === "error" ? "Lỗi khởi động gateway"
-                    : "Đang kết nối..."}
+                  ${
+                    this.gatewayStatus === "starting"
+                      ? "Đang khởi động gateway..."
+                      : this.gatewayStatus === "stopped"
+                        ? "Gateway đã dừng"
+                        : this.gatewayStatus === "error"
+                          ? "Lỗi khởi động gateway"
+                          : "Đang kết nối..."
+                  }
                 </span>
               </div>`
-            : nothing}
+              : nothing
+          }
 
           ${this.renderContent()}
         </main>
