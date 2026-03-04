@@ -38,7 +38,8 @@ import {
 } from "./auth-api";
 import {
   getChannelsStatus,
-  connectChannel,
+  startZaloQrLogin,
+  waitZaloQrLogin,
   disconnectChannel,
   CHANNEL_DEFINITIONS,
   type ChannelStatus,
@@ -121,7 +122,6 @@ import "./components/operis-modal";
 import "./components/operis-datetime-picker";
 import "./components/operis-confirm";
 import { DEFAULT_WORKFLOW_FORM } from "./workflow-types";
-import { getZaloStatus } from "./zalo-api";
 
 // Get page title
 function titleForTab(tab: Tab): string {
@@ -135,8 +135,8 @@ function titleForTab(tab: Tab): string {
     channels: "Kênh Kết Nối",
     settings: "Cài Đặt",
     login: "Đăng Nhập",
-    agents: "Agents",
-    skills: "Skills",
+    agents: "Nhân Viên",
+    skills: "Kĩ Năng",
     nodes: "Nodes",
     sessions: "Nhật Ký Phiên",
     report: "Góp Ý",
@@ -156,8 +156,8 @@ function subtitleForTab(tab: Tab): string {
     channels: "Kết nối ứng dụng nhắn tin",
     settings: "Cài đặt tài khoản và tùy chọn",
     login: "Truy cập tài khoản của bạn",
-    agents: "Quản lý agents và workspace",
-    skills: "Quản lý skills và cài đặt",
+    agents: "Quản lý nhân viên và workspace",
+    skills: "Quản lý kĩ năng và cài đặt",
     nodes: "Thiết bị và node kết nối",
     sessions: "Xem và quản lý các phiên hoạt động.",
     report: "Ý kiến của bạn giúp chúng mình phát triển tốt hơn",
@@ -340,7 +340,6 @@ export class OperisApp extends LitElement {
   @state() channelsConnecting: ChannelId | null = null;
   @state() zaloQrBase64: string | null = null;
   @state() zaloQrStatus: string | null = null;
-  private zaloPollingTimer: ReturnType<typeof setInterval> | null = null;
 
   // Settings state
   @state() userProfile: UserProfile | null = null;
@@ -464,6 +463,7 @@ export class OperisApp extends LitElement {
   private toolEventUnsubscribe: (() => void) | null = null;
   private gatewayStatusUnsubscribe: (() => void) | null = null;
   private reconnectUnsubscribe: (() => void) | null = null;
+  private gatewayStatusUnsubscribe: (() => void) | null = null;
 
   createRenderRoot() {
     return this;
@@ -1400,16 +1400,20 @@ export class OperisApp extends LitElement {
 
   private async scrollChatToBottom() {
     await this.updateComplete;
-    await new Promise((r) => requestAnimationFrame(r));
 
     const messagesEl = this.renderRoot.querySelector(".gc-messages") as HTMLElement;
     if (!messagesEl) return;
+
+    // Hide messages to prevent flash at top while positioning scroll
+    messagesEl.style.visibility = "hidden";
+    await new Promise((r) => requestAnimationFrame(r));
 
     const userMessages = messagesEl.querySelectorAll(".gc-message--user");
     const lastUserMsg = userMessages[userMessages.length - 1] as HTMLElement;
 
     if (!lastUserMsg) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
+      messagesEl.style.visibility = "";
       return;
     }
 
@@ -1431,6 +1435,15 @@ export class OperisApp extends LitElement {
       const neededTotal = messagesEl.scrollTop + messagesEl.clientHeight;
       spacer.style.height = `${Math.max(0, neededTotal - contentWithoutSpacer)}px`;
     }
+
+    // Reveal messages after scroll is positioned
+    messagesEl.style.visibility = "";
+
+    // Auto-focus the chat input
+    const input = this.renderRoot.querySelector(
+      ".gc-input-bottom .gc-input",
+    ) as HTMLTextAreaElement;
+    input?.focus();
   }
 
   private setTheme(mode: ThemeMode, context?: ThemeTransitionContext) {
@@ -1756,6 +1769,13 @@ export class OperisApp extends LitElement {
         })
         .filter((m) => m.content);
 
+      // Preserve scroll position on non-initial reloads (avoid jumping to top)
+      const messagesEl = !isInitialLoad
+        ? (this.renderRoot.querySelector(".gc-messages") as HTMLElement)
+        : null;
+      const prevScrollTop = messagesEl?.scrollTop ?? 0;
+      const prevScrollHeight = messagesEl?.scrollHeight ?? 0;
+
       // Gateway is source of truth — always replace local state
       this.chatMessages = parsed;
       // Store thinking level from session (used in chat.send)
@@ -1763,6 +1783,16 @@ export class OperisApp extends LitElement {
         this.chatThinkingLevel = res.thinkingLevel;
       }
       this.cacheChatMessages();
+
+      // Restore scroll position after re-render (non-initial reloads only)
+      if (messagesEl) {
+        await this.updateComplete;
+        requestAnimationFrame(() => {
+          // If new messages were added, adjust scroll to keep same view
+          const delta = messagesEl.scrollHeight - prevScrollHeight;
+          messagesEl.scrollTop = prevScrollTop + delta;
+        });
+      }
     } catch (err) {
       console.warn("[chat] Failed to load messages from gateway:", err);
       // If gateway failed and we have no messages, try cache as fallback
@@ -2330,15 +2360,19 @@ export class OperisApp extends LitElement {
     this.channelsConnecting = channelId;
     this.channelsError = null;
     try {
-      const result = await connectChannel(channelId);
-      console.log("[channels] connect result:", channelId);
-
-      // Zalo: start QR polling flow
-      if (channelId === "zalo" && result.sessionToken) {
+      if (channelId === "zalo") {
+        // Zalo: QR login via gateway WS
         this.zaloQrStatus = "pending";
         this.zaloQrBase64 = null;
-        this.startZaloPolling(result.sessionToken);
-        return; // Don't clear channelsConnecting yet — QR modal stays open
+        const startResult = await startZaloQrLogin({ force: true });
+        console.log("[channels] zalo QR start:", startResult.message);
+        if (startResult.qrDataUrl) {
+          this.zaloQrBase64 = startResult.qrDataUrl;
+          this.zaloQrStatus = "qr_ready";
+        }
+        // Wait for login completion in background
+        this.startZaloLoginWait();
+        return; // Don't clear channelsConnecting — QR modal stays open
       }
 
       await this.loadChannels();
@@ -2347,51 +2381,33 @@ export class OperisApp extends LitElement {
       console.error("[channels] connect error:", err);
       this.channelsError = err instanceof Error ? err.message : "Không thể kết nối kênh";
       showToast(err instanceof Error ? err.message : "Không thể kết nối kênh", "error");
-    } finally {
-      if (this.zaloQrStatus === null) {
-        this.channelsConnecting = null;
-      }
+      this.zaloQrStatus = null;
+      this.zaloQrBase64 = null;
+      this.channelsConnecting = null;
     }
   }
 
-  private startZaloPolling(sessionToken: string) {
-    // Only clear previous timer, don't reset QR state
-    if (this.zaloPollingTimer) {
-      clearInterval(this.zaloPollingTimer);
-      this.zaloPollingTimer = null;
-    }
-    this.zaloPollingTimer = setInterval(async () => {
-      try {
-        const status = await getZaloStatus(sessionToken);
-        this.zaloQrStatus = status.status;
-
-        if (status.qrBase64) {
-          this.zaloQrBase64 = status.qrBase64;
-        }
-
-        // Terminal states
-        if (status.status === "success") {
-          this.stopZaloPolling();
-          this.channelsConnecting = null;
-          await this.loadChannels();
-        } else if (status.status === "error") {
-          this.stopZaloPolling();
-          this.channelsConnecting = null;
-          this.channelsError = status.error || "Kết nối Zalo thất bại";
-        }
-      } catch {
+  private async startZaloLoginWait() {
+    try {
+      const result = await waitZaloQrLogin({ timeoutMs: 120_000 });
+      if (result.connected) {
         this.stopZaloPolling();
         this.channelsConnecting = null;
-        this.channelsError = "Mất kết nối khi chờ quét mã QR";
+        showToast("Đã kết nối Zalo", "success");
+        await this.loadChannels();
+      } else {
+        this.stopZaloPolling();
+        this.channelsConnecting = null;
+        this.channelsError = result.message || "Kết nối Zalo thất bại";
       }
-    }, 2000);
+    } catch {
+      this.stopZaloPolling();
+      this.channelsConnecting = null;
+      this.channelsError = "Mất kết nối khi chờ quét mã QR";
+    }
   }
 
   private stopZaloPolling() {
-    if (this.zaloPollingTimer) {
-      clearInterval(this.zaloPollingTimer);
-      this.zaloPollingTimer = null;
-    }
     this.zaloQrBase64 = null;
     this.zaloQrStatus = null;
   }
@@ -2545,7 +2561,7 @@ export class OperisApp extends LitElement {
         }
       }
     } catch (err) {
-      this.agentsError = err instanceof Error ? err.message : "Không thể tải agents";
+      this.agentsError = err instanceof Error ? err.message : "Không thể tải nhân viên";
     } finally {
       this.agentsLoading = false;
     }
@@ -2759,7 +2775,7 @@ export class OperisApp extends LitElement {
         this.agentSkillsAgentId = agentId;
       }
     } catch (err) {
-      this.agentSkillsError = err instanceof Error ? err.message : "Không thể tải skills";
+      this.agentSkillsError = err instanceof Error ? err.message : "Không thể tải kĩ năng";
     } finally {
       this.agentSkillsLoading = false;
     }
@@ -3436,8 +3452,8 @@ export class OperisApp extends LitElement {
       channels: "Kênh",
       settings: "Cài đặt",
       login: "Đăng nhập",
-      agents: "Agents",
-      skills: "Skills",
+      agents: "Nhân viên",
+      skills: "Kĩ năng",
       nodes: "Nodes",
       sessions: "Nhật ký phiên",
       report: "Góp ý",
@@ -3955,11 +3971,13 @@ export class OperisApp extends LitElement {
           onPatch: (key, patch) => this.handleSessionsPatch(key, patch),
           onDelete: (key) => this.handleSessionsDelete(key),
           onOpenSession: (key) => {
-            this.chatConversationId = key === "main" ? null : key;
+            const fullKey = this.normalizeSessionKey(key);
+            this.chatConversationId = fullKey === "agent:main:main" ? null : fullKey;
             this.chatMessages = [];
             this.chatStreamingText = "";
             this.chatToolCalls = [];
-            this.persistSessionKey(key);
+            this.chatInitializing = true;
+            this.persistSessionKey(fullKey);
             this.setTab("chat");
           },
         });
@@ -4067,20 +4085,29 @@ export class OperisApp extends LitElement {
               : nothing
           }
 
-          ${this.settings.isLoggedIn && this.gatewayStatus !== "running" && this.gatewayStatus !== "unknown"
-            ? html`
+          ${
+            this.settings.isLoggedIn &&
+            this.gatewayStatus !== "running" &&
+            this.gatewayStatus !== "unknown"
+              ? html`
               <div class="gw-banner gw-banner--${this.gatewayStatus}">
                 <span class="gw-banner__icon">
                   ${this.gatewayStatus === "error" ? "\u26A0" : "\u27F3"}
                 </span>
                 <span class="gw-banner__text">
-                  ${this.gatewayStatus === "starting" ? "Đang khởi động gateway..."
-                    : this.gatewayStatus === "stopped" ? "Gateway đã dừng"
-                    : this.gatewayStatus === "error" ? "Lỗi khởi động gateway"
-                    : "Đang kết nối..."}
+                  ${
+                    this.gatewayStatus === "starting"
+                      ? "Đang khởi động gateway..."
+                      : this.gatewayStatus === "stopped"
+                        ? "Gateway đã dừng"
+                        : this.gatewayStatus === "error"
+                          ? "Lỗi khởi động gateway"
+                          : "Đang kết nối..."
+                  }
                 </span>
               </div>`
-            : nothing}
+              : nothing
+          }
 
           ${this.renderContent()}
         </main>
