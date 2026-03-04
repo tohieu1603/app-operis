@@ -1574,11 +1574,16 @@ export function renderChat(props: ChatProps) {
             >
               ${
                 gatewaySessions.length > 0
-                  ? gatewaySessions.map((s) => {
+                  ? html`${gatewaySessions.map((s) => {
                       const { label, description } = formatSessionDisplay(s);
                       const text = description ? `${label} — ${description}` : label;
                       return html`<option value=${s.key} ?selected=${s.key === sessionKey}>${text}</option>`;
-                    })
+                    })}${
+                      // If current session isn't in the web-chat list, add it as an extra option
+                      !gatewaySessions.some((s) => s.key === sessionKey)
+                        ? html`<option value=${sessionKey} selected>${sessionKey.replace(/^agent:main:/, "")}</option>`
+                        : nothing
+                    }`
                   : html`<option value=${sessionKey} selected>${sessionKey.split(":").pop() || sessionKey}</option>`
               }
             </select>
