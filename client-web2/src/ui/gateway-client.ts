@@ -601,7 +601,7 @@ let connectionPromise: Promise<void> | null = null;
 // Get token from URL query param or env
 function getGatewayToken(): string | undefined {
   const params = new URLSearchParams(window.location.search);
-  return params.get("token") ?? import.meta.env.VITE_GATEWAY_TOKEN ?? undefined;
+  return params.get("token") ?? undefined;
 }
 
 // Get WebSocket URL - use VITE_GATEWAY_WS or derive from current location
