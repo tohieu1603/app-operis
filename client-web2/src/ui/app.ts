@@ -38,6 +38,8 @@ import {
 } from "./auth-api";
 import {
   getChannelsStatus,
+  isChannelConfigured,
+  saveTelegramBotToken,
   startZaloQrLogin,
   waitZaloQrLogin,
   disconnectChannel,
@@ -342,6 +344,10 @@ export class OperisApp extends LitElement {
   @state() channelsConnecting: ChannelId | null = null;
   @state() zaloQrBase64: string | null = null;
   @state() zaloQrStatus: string | null = null;
+  @state() telegramTokenModal = false;
+  @state() telegramTokenValue = "";
+  @state() telegramTokenSaving = false;
+  @state() telegramTokenError: string | null = null;
 
   // Settings state
   @state() userProfile: UserProfile | null = null;
@@ -2409,6 +2415,20 @@ export class OperisApp extends LitElement {
         return; // Don't clear channelsConnecting — QR modal stays open
       }
 
+      if (channelId === "telegram") {
+        // Check if telegram is already configured (has bot token)
+        const configured = await isChannelConfigured("telegram");
+        if (!configured) {
+          // Show bot token input modal
+          this.telegramTokenModal = true;
+          this.telegramTokenValue = "";
+          this.telegramTokenError = null;
+          this.telegramTokenSaving = false;
+          this.channelsConnecting = null;
+          return;
+        }
+      }
+
       await this.loadChannels();
       showToast("Đã kết nối kênh", "success");
     } catch (err) {
@@ -2419,6 +2439,32 @@ export class OperisApp extends LitElement {
       this.zaloQrBase64 = null;
       this.channelsConnecting = null;
     }
+  }
+
+  private async handleTelegramTokenSave() {
+    const token = this.telegramTokenValue.trim();
+    if (!token) return;
+    this.telegramTokenSaving = true;
+    this.telegramTokenError = null;
+    try {
+      await saveTelegramBotToken(token);
+      this.telegramTokenModal = false;
+      this.telegramTokenValue = "";
+      showToast("Bot token đã lưu — đang kết nối Telegram...", "success");
+      // Wait briefly for gateway restart then reload status
+      setTimeout(() => this.loadChannels(), 3000);
+    } catch (err) {
+      this.telegramTokenError = err instanceof Error ? err.message : "Không thể lưu bot token";
+    } finally {
+      this.telegramTokenSaving = false;
+    }
+  }
+
+  private handleTelegramTokenCancel() {
+    this.telegramTokenModal = false;
+    this.telegramTokenValue = "";
+    this.telegramTokenError = null;
+    this.channelsConnecting = null;
   }
 
   private async startZaloLoginWait() {
@@ -4152,6 +4198,67 @@ export class OperisApp extends LitElement {
           ${this.renderContent()}
         </main>
 
+        ${this.renderTelegramTokenModal()}
+      </div>
+    `;
+  }
+
+  private renderTelegramTokenModal() {
+    if (!this.telegramTokenModal) return nothing;
+    return html`
+      <style>
+        .tg-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .tg-modal { background: var(--card); border-radius: var(--radius-lg); padding: 24px; width: 420px; max-width: 90vw; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+        .tg-modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+        .tg-modal-header h3 { margin: 0; font-size: 18px; font-weight: 600; color: var(--text-strong); }
+        .tg-close-btn { background: none; border: none; font-size: 24px; color: var(--muted); cursor: pointer; padding: 0 4px; line-height: 1; }
+        .tg-close-btn:hover { color: var(--text-strong); }
+        .tg-instruction { font-size: 14px; color: var(--muted); margin: 0 0 16px; line-height: 1.5; }
+        .tg-instruction a { color: #0088cc; text-decoration: none; }
+        .tg-instruction a:hover { text-decoration: underline; }
+        .tg-instruction code { background: var(--bg-muted); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+        .tg-input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 14px; font-family: monospace; box-sizing: border-box; }
+        .tg-input:focus { outline: none; border-color: #0088cc; box-shadow: 0 0 0 2px rgba(0, 136, 204, 0.2); }
+        .tg-input.tg-err { border-color: #ef4444; }
+        .tg-error-msg { font-size: 13px; color: #ef4444; margin: 8px 0 0; }
+        .tg-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+        .tg-actions .btn { min-width: 80px; }
+      </style>
+      <div class="tg-overlay" @click=${() => this.handleTelegramTokenCancel()}>
+        <div class="tg-modal" @click=${(e: Event) => e.stopPropagation()}>
+          <div class="tg-modal-header">
+            <h3>Kết nối Telegram</h3>
+            <button class="tg-close-btn" @click=${() => this.handleTelegramTokenCancel()}>&times;</button>
+          </div>
+          <p class="tg-instruction">
+            Nhập Bot Token từ
+            <a href="https://t.me/BotFather" target="_blank">@BotFather</a>
+            trên Telegram. Tạo bot mới bằng lệnh <code>/newbot</code> để lấy token.
+          </p>
+          <input
+            class="tg-input ${this.telegramTokenError ? "tg-err" : ""}"
+            type="text"
+            placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
+            .value=${this.telegramTokenValue}
+            @input=${(e: Event) => (this.telegramTokenValue = (e.target as HTMLInputElement).value)}
+            @keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && !this.telegramTokenSaving) this.handleTelegramTokenSave(); }}
+            ?disabled=${this.telegramTokenSaving}
+          />
+          ${this.telegramTokenError ? html`<p class="tg-error-msg">${this.telegramTokenError}</p>` : nothing}
+          <div class="tg-actions">
+            <button class="btn btn-secondary" @click=${() => this.handleTelegramTokenCancel()} ?disabled=${this.telegramTokenSaving}>
+              Hủy
+            </button>
+            <button
+              class="btn btn-primary"
+              style="background: #0088cc; border-color: #0088cc;"
+              @click=${() => this.handleTelegramTokenSave()}
+              ?disabled=${this.telegramTokenSaving || !this.telegramTokenValue.trim()}
+            >
+              ${this.telegramTokenSaving ? "Đang lưu..." : "Lưu & Kết nối"}
+            </button>
+          </div>
+        </div>
       </div>
     `;
   }

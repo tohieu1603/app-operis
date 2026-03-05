@@ -113,6 +113,34 @@ export async function waitZaloQrLogin(params?: {
   });
 }
 
+// Check if a specific channel is configured (has credentials)
+export async function isChannelConfigured(channelId: ChannelId): Promise<boolean> {
+  try {
+    const gw = await waitForConnection(3000);
+    const gwId = GATEWAY_CHANNEL_MAP[channelId] ?? channelId;
+    const res = await gw.request<{
+      channels?: Record<string, { configured?: boolean }>;
+    }>("channels.status", { probe: false });
+    const summary = res?.channels?.[channelId] ?? res?.channels?.[gwId];
+    return summary?.configured === true;
+  } catch {
+    return false;
+  }
+}
+
+// Save Telegram bot token to gateway config via config.patch
+export async function saveTelegramBotToken(token: string): Promise<void> {
+  const gw = await waitForConnection(5000);
+  const snapshot = await gw.request<{ hash: string }>("config.get", {});
+  const baseHash = snapshot?.hash ?? "";
+  await gw.request("config.patch", {
+    baseHash,
+    raw: JSON.stringify({
+      channels: { telegram: { botToken: token } },
+    }),
+  });
+}
+
 // Disconnect a channel via gateway
 export async function disconnectChannel(channelId: ChannelId): Promise<{ success: boolean }> {
   const gw = await waitForConnection(5000);
