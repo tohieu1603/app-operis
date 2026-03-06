@@ -1623,6 +1623,7 @@ function renderAgentTabs(active: AgentsPanel, onSelect: (panel: AgentsPanel) => 
   const tabs: Array<{ id: AgentsPanel; label: string }> = [
     { id: "files", label: "Files" },
     { id: "tools", label: "Tools" },
+    { id: "skills", label: "Skills" },
   ];
   return html`
     <div class="agent-tabs">
