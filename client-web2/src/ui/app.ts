@@ -1560,6 +1560,16 @@ export class OperisApp extends LitElement {
   }
 
   private async handleChannelConnect(channelId: ChannelId) {
+    // Telegram: open token modal if not yet connected
+    if (channelId === "telegram") {
+      const tgStatus = this.channels.find((c) => c.id === "telegram");
+      if (!tgStatus?.connected) {
+        this.telegramTokenModal = true;
+        this.telegramTokenValue = "";
+        this.telegramTokenError = null;
+        return;
+      }
+    }
     await channel.handleChannelConnect(this, channelId);
     // If Zalo QR flow started, kick off background wait
     if (channelId === "zalo" && this.zaloQrStatus !== null) {

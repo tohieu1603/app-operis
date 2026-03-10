@@ -37,6 +37,7 @@ const STUB_PACKAGES = [
 const NATIVE_EXTERNAL_PACKAGES = [
   'sharp',
   '@lydell/node-pty',
+  `@lydell/node-pty-${process.platform}-${process.arch}`, // platform-specific native binary
 ];
 
 // Pure-JS modules that must be external because esbuild bundling breaks their
@@ -270,6 +271,23 @@ if (fs.existsSync(sharpPlatformSrc)) {
     }
   } else {
     console.warn(`  ✗ ${sharpPlatformPkg} (not found — sharp image ops will fail gracefully)`);
+  }
+}
+
+// @lydell/node-pty platform-specific binary (pnpm doesn't hoist it)
+const ptyPlatformPkg = `@lydell/node-pty-${process.platform}-${process.arch}`;
+const ptyPlatformDest = path.join(nmOut, ...ptyPlatformPkg.split('/'));
+if (!fs.existsSync(ptyPlatformDest) || !fs.readdirSync(ptyPlatformDest).length) {
+  const pnpmPtyName = ptyPlatformPkg.replace('/', '+');
+  const pnpmPtyMatches = fs.readdirSync(pnpmDir).filter(d => d.startsWith(pnpmPtyName + '@'));
+  if (pnpmPtyMatches.length) {
+    const ptySrc = path.join(pnpmDir, pnpmPtyMatches[0], 'node_modules', ...ptyPlatformPkg.split('/'));
+    if (fs.existsSync(ptyPlatformDest)) fs.rmSync(ptyPlatformDest, { recursive: true });
+    if (copyDirSync(ptySrc, ptyPlatformDest)) {
+      console.log(`  ✓ ${ptyPlatformPkg} (from pnpm store)`);
+    }
+  } else {
+    console.warn(`  ✗ ${ptyPlatformPkg} (not found — PTY will fall back to non-PTY exec)`);
   }
 }
 

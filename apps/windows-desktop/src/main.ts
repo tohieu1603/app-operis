@@ -293,9 +293,10 @@ app.whenReady().then(async () => {
     }
   }
 
-  // Every startup: fill missing preset keys into existing config (non-destructive)
+  // Every startup: fill missing preset keys + force-apply models/agents from preset
   if (presetPath) {
     onboardMgr.ensurePresetDefaults(presetPath);
+    onboardMgr.forceApplyPresetModels(presetPath);
   }
   onboardMgr.ensureElectronConfig();
   onboardMgr.ensureAgentAuthStore();

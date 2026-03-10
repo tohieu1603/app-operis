@@ -5,6 +5,7 @@ import { normalizeCronJobCreate, normalizeCronJobPatch } from "../../cron/normal
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import { resolveSessionAgentId } from "../agent-scope.js";
+import { resolveDefaultModelForAgent } from "../model-selection.js";
 import { optionalStringEnum, stringEnum } from "../schema/typebox.js";
 import { type AnyAgentTool, jsonResult, readStringParam } from "./common.js";
 import { callGatewayTool, type GatewayCallOptions } from "./gateway.js";
@@ -312,7 +313,9 @@ Use jobId as the canonical identifier; id is accepted for compatibility. Use con
             }
           }
 
-          // Auto-inject cron model override for agentTurn jobs when not explicitly set
+          // Auto-inject cron model override for agentTurn jobs when not explicitly set.
+          // Use the gateway's configured default model (from config preset) instead of
+          // hardcoding, so Claude-edition and other presets work correctly.
           if (
             job &&
             typeof job === "object" &&
@@ -321,7 +324,9 @@ Use jobId as the canonical identifier; id is accepted for compatibility. Use con
           ) {
             const payload = (job as { payload: { kind: string; model?: string } }).payload;
             if (!payload.model) {
-              payload.model = "operis/operis-multi";
+              const cfg = loadConfig();
+              const defaultRef = resolveDefaultModelForAgent({ cfg });
+              payload.model = `${defaultRef.provider}/${defaultRef.model}`;
             }
           }
 

@@ -86,7 +86,6 @@ export class OnboardManager {
       channels: {
         telegram: {
           dmPolicy: "open",
-          botToken: "",
           allowFrom: ["*"],
           groupPolicy: "allowlist",
           streamMode: "partial",
@@ -232,6 +231,53 @@ export class OnboardManager {
   }
 
   /**
+   * Force-apply models and agents sections from the bundled preset.
+   * Unlike ensurePresetDefaults (which only fills missing keys), this
+   * overwrites providers/models/agents so existing configs always match
+   * the bundled edition (operis vs claude).
+   */
+  forceApplyPresetModels(presetPath: string): void {
+    try {
+      const presetRaw = fs.readFileSync(presetPath, "utf-8");
+      const preset = JSON.parse(presetRaw);
+      const configRaw = fs.readFileSync(this.configFilePath, "utf-8");
+      const config = JSON.parse(configRaw);
+
+      let modified = false;
+
+      if (preset.models?.providers) {
+        config.models ??= {};
+        if (JSON.stringify(config.models.providers) !== JSON.stringify(preset.models.providers)) {
+          config.models.providers = preset.models.providers;
+          modified = true;
+        }
+      }
+
+      if (preset.agents?.defaults) {
+        config.agents ??= {};
+        if (JSON.stringify(config.agents.defaults) !== JSON.stringify(preset.agents.defaults)) {
+          config.agents.defaults = preset.agents.defaults;
+          modified = true;
+        }
+      }
+
+      if (preset.agents?.list) {
+        config.agents ??= {};
+        if (JSON.stringify(config.agents.list) !== JSON.stringify(preset.agents.list)) {
+          config.agents.list = preset.agents.list;
+          modified = true;
+        }
+      }
+
+      if (modified) {
+        fs.writeFileSync(this.configFilePath, JSON.stringify(config, null, 2), "utf-8");
+      }
+    } catch (err) {
+      console.error("[onboard] Failed to force-apply preset models:", err);
+    }
+  }
+
+  /**
    * Ensure gateway config has Electron-specific settings (idempotent).
    * Called after onboard and on every app startup.
    */
@@ -322,14 +368,10 @@ export class OnboardManager {
       // Enable channels (telegram + zalozcajs)
       config.channels ??= {};
 
-      // Telegram channel defaults (user fills botToken in settings)
+      // Telegram channel defaults (user fills botToken via settings modal)
       config.channels.telegram ??= {};
       if (!config.channels.telegram.dmPolicy) {
         config.channels.telegram.dmPolicy = "open";
-        modified = true;
-      }
-      if (config.channels.telegram.botToken === undefined) {
-        config.channels.telegram.botToken = "";
         modified = true;
       }
       if (!config.channels.telegram.allowFrom) {

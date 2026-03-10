@@ -19,7 +19,8 @@
     "build:set-development": "node scripts/set-build-mode.mjs development",
     "build": "pnpm build:gateway && pnpm build:ui && pnpm build:bundle-gateway && pnpm build:electron && pnpm build:installer",
     "build:ws": "pnpm build:gateway && pnpm build:ui-ws && pnpm build:bundle-gateway && pnpm build:electron && pnpm build:installer-ws",
-    "build:product": "pnpm build:gateway && pnpm build:ui && pnpm build:bundle-gateway && pnpm build:set-production && pnpm build:electron && pnpm build:installer-product && pnpm build:set-development"
+    "build:product": "pnpm build:gateway && pnpm build:ui && pnpm build:bundle-gateway && pnpm build:set-production && pnpm build:electron && pnpm build:installer-product && pnpm build:set-development",
+    "build:claude": "node scripts/build-claude.mjs"
   },
   "devDependencies": {
     "electron": "^35.0.0",

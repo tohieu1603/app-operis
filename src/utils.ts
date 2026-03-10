@@ -309,16 +309,26 @@ export function resolveConfigDir(
   if (override) {
     return resolveUserPath(override);
   }
-  const newDir = path.join(resolveRequiredHomeDir(env, homedir), ".openclaw");
+  const home = resolveRequiredHomeDir(env, homedir);
+  // Prefer new .operis dir, fall back to legacy .openclaw if it exists
+  const operisDir = path.join(home, ".operis");
   try {
-    const hasNew = fs.existsSync(newDir);
-    if (hasNew) {
-      return newDir;
+    if (fs.existsSync(operisDir)) {
+      return operisDir;
     }
   } catch {
     // best-effort
   }
-  return newDir;
+  const legacyDir = path.join(home, ".openclaw");
+  try {
+    if (fs.existsSync(legacyDir)) {
+      return legacyDir;
+    }
+  } catch {
+    // best-effort
+  }
+  // Default to new .operis (will be created on first use)
+  return operisDir;
 }
 
 export function resolveHomeDir(): string | undefined {

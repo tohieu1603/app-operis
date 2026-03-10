@@ -9,6 +9,7 @@ import { app } from "electron";
 import path from "node:path";
 import net from "node:net";
 import fs from "node:fs";
+import os from "node:os";
 import { GATEWAY_PORT, type GatewayStatus } from "./types";
 
 type StatusListener = (status: GatewayStatus, detail?: string) => void;
@@ -189,6 +190,18 @@ export class GatewayManager {
       OPENCLAW_BUNDLED_PLUGINS_DIR: pluginsDir,
       NODE_PATH: gatewayNodeModules,
     };
+
+    // Guarantee System32 in PATH and SystemRoot/WINDIR in env so child processes
+    // (taskkill, netstat, powershell) resolve correctly inside the gateway sandbox.
+    if (process.platform === "win32") {
+      const systemRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
+      const sys32 = path.join(systemRoot, "System32");
+      env.SystemRoot = systemRoot;
+      env.WINDIR = systemRoot;
+      if (!(env.PATH ?? "").toLowerCase().includes("system32")) {
+        env.PATH = `${sys32};${path.join(sys32, "WindowsPowerShell", "v1.0")};${env.PATH ?? ""}`;
+      }
+    }
     // Pass gateway token via env to survive config hot-reloads
     if (this.gatewayToken) {
       env.OPENCLAW_GATEWAY_TOKEN = this.gatewayToken;
@@ -289,6 +302,53 @@ export class GatewayManager {
     }
   }
 
+  /**
+   * Remove stale gateway lock files left behind by a crashed process.
+   * The lock dir is os.tmpdir()/operis/ (or /openclaw/ for legacy).
+   * Only removes locks whose PID matches our dead child or is no longer alive.
+   */
+  private cleanStaleLocks(): void {
+    const lockDirs = [
+      path.join(os.tmpdir(), "operis"),
+      path.join(os.tmpdir(), "openclaw"),
+    ];
+    for (const lockDir of lockDirs) {
+      try {
+        if (!fs.existsSync(lockDir)) continue;
+        for (const f of fs.readdirSync(lockDir)) {
+          if (!f.startsWith("gateway.") || !f.endsWith(".lock")) continue;
+          const lockPath = path.join(lockDir, f);
+          try {
+            const payload = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+            const pid = payload?.pid;
+            if (typeof pid !== "number") {
+              fs.rmSync(lockPath, { force: true });
+              this.appendLog("system", `Removed corrupt lock: ${f}`);
+              continue;
+            }
+            // Check if the PID is still alive
+            let alive = false;
+            try {
+              process.kill(pid, 0);
+              alive = true;
+            } catch {
+              alive = false;
+            }
+            if (!alive) {
+              fs.rmSync(lockPath, { force: true });
+              this.appendLog("system", `Removed stale lock: ${f} (pid ${pid} dead)`);
+            }
+          } catch {
+            // Corrupt or unreadable — safe to remove
+            try { fs.rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+          }
+        }
+      } catch {
+        // Lock dir missing or inaccessible — ignore
+      }
+    }
+  }
+
   /** Schedule restart with exponential backoff */
   private scheduleRestart(): void {
     if (this.shuttingDown) return;
@@ -300,6 +360,8 @@ export class GatewayManager {
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       if (!this.shuttingDown) {
+        this.cleanStaleLocks();
+        this.killZombieOnPort();
         this.spawnGateway();
       }
     }, delay);
