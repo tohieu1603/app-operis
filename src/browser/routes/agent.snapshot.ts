@@ -2,6 +2,7 @@ import path from "node:path";
 import type { BrowserRouteContext } from "../server-context.js";
 import type { BrowserResponse, BrowserRouteRegistrar } from "./types.js";
 import { ensureMediaDir, saveMediaBuffer } from "../../media/store.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { captureScreenshot, snapshotAria } from "../cdp.js";
 import {
   DEFAULT_AI_SNAPSHOT_EFFICIENT_DEPTH,
@@ -25,6 +26,8 @@ import {
 } from "./agent.shared.js";
 import { jsonError, toBoolean, toNumber, toStringOrEmpty } from "./utils.js";
 
+const log = createSubsystemLogger("browser").child("snapshot");
+
 async function saveBrowserMediaResponse(params: {
   res: BrowserResponse;
   buffer: Buffer;
@@ -33,19 +36,30 @@ async function saveBrowserMediaResponse(params: {
   targetId: string;
   url: string;
 }) {
-  await ensureMediaDir();
-  const saved = await saveMediaBuffer(
-    params.buffer,
-    params.contentType,
-    "browser",
-    params.maxBytes,
-  );
-  params.res.json({
-    ok: true,
-    path: path.resolve(saved.path),
-    targetId: params.targetId,
-    url: params.url,
-  });
+  try {
+    await ensureMediaDir();
+    const saved = await saveMediaBuffer(
+      params.buffer,
+      params.contentType,
+      "browser",
+      params.maxBytes,
+    );
+    params.res.json({
+      ok: true,
+      path: path.resolve(saved.path),
+      targetId: params.targetId,
+      url: params.url,
+    });
+  } catch (err) {
+    log.warn(`Media save failed, returning inline base64: ${String(err)}`);
+    params.res.json({
+      ok: true,
+      data: params.buffer.toString("base64"),
+      contentType: params.contentType,
+      targetId: params.targetId,
+      url: params.url,
+    });
+  }
 }
 
 /** Resolve the correct targetId after a navigation that may trigger a renderer swap. */

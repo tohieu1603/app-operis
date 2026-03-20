@@ -8,6 +8,29 @@
 import path from "node:path";
 import fs from "node:fs";
 
+/**
+ * Recursively resolve env var placeholders in JSON values.
+ * Strings starting with "$" (e.g. "$ANTHROPIC_API_KEY") are replaced
+ * with the corresponding environment variable value, or kept as-is if unset.
+ */
+function resolveEnvPlaceholders(obj: unknown): unknown {
+  if (typeof obj === "string" && obj.startsWith("$")) {
+    const envName = obj.slice(1);
+    return process.env[envName] || obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(resolveEnvPlaceholders);
+  }
+  if (obj !== null && typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      result[k] = resolveEnvPlaceholders(v);
+    }
+    return result;
+  }
+  return obj;
+}
+
 export class OnboardManager {
   private readonly stateDir: string;
 
@@ -113,7 +136,7 @@ export class OnboardManager {
   applyPreset(presetPath: string): void {
     try {
       const presetRaw = fs.readFileSync(presetPath, "utf-8");
-      const preset = JSON.parse(presetRaw);
+      const preset = resolveEnvPlaceholders(JSON.parse(presetRaw)) as Record<string, unknown>;
       const configRaw = fs.readFileSync(this.configFilePath, "utf-8");
       const config = JSON.parse(configRaw);
 
@@ -132,7 +155,7 @@ export class OnboardManager {
   ensurePresetDefaults(presetPath: string): void {
     try {
       const presetRaw = fs.readFileSync(presetPath, "utf-8");
-      const preset = JSON.parse(presetRaw);
+      const preset = resolveEnvPlaceholders(JSON.parse(presetRaw)) as Record<string, unknown>;
       const configRaw = fs.readFileSync(this.configFilePath, "utf-8");
       const config = JSON.parse(configRaw);
 
@@ -239,7 +262,8 @@ export class OnboardManager {
   forceApplyPresetModels(presetPath: string): void {
     try {
       const presetRaw = fs.readFileSync(presetPath, "utf-8");
-      const preset = JSON.parse(presetRaw);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const preset = resolveEnvPlaceholders(JSON.parse(presetRaw)) as any;
       const configRaw = fs.readFileSync(this.configFilePath, "utf-8");
       const config = JSON.parse(configRaw);
 

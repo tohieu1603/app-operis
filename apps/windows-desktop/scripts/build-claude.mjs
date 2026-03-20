@@ -20,11 +20,19 @@ if (!fs.existsSync(claudePreset)) {
   process.exit(1);
 }
 
+const anthropicKey = process.env.ANTHROPIC_API_KEY;
+if (!anthropicKey) {
+  console.error("[build-claude] ANTHROPIC_API_KEY env var is required. Set it before building.");
+  process.exit(1);
+}
+
 // Backup original operis preset
 fs.copyFileSync(operisPreset, backup);
-// Swap claude preset as operis (gateway expects config-preset-operis.json)
-fs.copyFileSync(claudePreset, operisPreset);
-console.log("[build-claude] Swapped preset → anthropic/claude-opus-4-6");
+// Read claude preset, resolve $ANTHROPIC_API_KEY placeholder, write as operis preset
+const claudeRaw = fs.readFileSync(claudePreset, "utf-8");
+const resolved = claudeRaw.replace(/"\$ANTHROPIC_API_KEY"/g, JSON.stringify(anthropicKey));
+fs.writeFileSync(operisPreset, resolved, "utf-8");
+console.log("[build-claude] Swapped preset → anthropic/claude-opus-4-6 (key from env)");
 
 try {
   // Build gateway + UI + bundle + electron, then use claude-specific installer config

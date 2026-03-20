@@ -4,7 +4,7 @@
       "anthropic": {
         "baseUrl": "https://api.anthropic.com",
         "api": "anthropic-messages",
-        "apiKey": "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",
+        "apiKey": "$ANTHROPIC_API_KEY",
         "models": [
           {
             "id": "claude-opus-4-6",

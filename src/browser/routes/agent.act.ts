@@ -7,6 +7,8 @@ import { registerBrowserAgentActHookRoutes } from "./agent.act.hooks.js";
 import {
   type ActKind,
   isActKind,
+  invalidKindMessage,
+  missingRefMessage,
   parseClickButton,
   parseClickModifiers,
 } from "./agent.act.shared.js";
@@ -26,7 +28,7 @@ export function registerBrowserAgentActRoutes(
     const body = readBody(req);
     const kindRaw = toStringOrEmpty(body.kind);
     if (!isActKind(kindRaw)) {
-      return jsonError(res, 400, "kind is required");
+      return jsonError(res, 400, invalidKindMessage(kindRaw));
     }
     const kind: ActKind = kindRaw;
     const targetId = resolveTargetIdFromBody(body);
@@ -47,7 +49,7 @@ export function registerBrowserAgentActRoutes(
           case "click": {
             const ref = toStringOrEmpty(body.ref);
             if (!ref) {
-              return jsonError(res, 400, "ref is required");
+              return jsonError(res, 400, missingRefMessage(kind));
             }
             const doubleClick = toBoolean(body.doubleClick) ?? false;
             const timeoutMs = toNumber(body.timeoutMs);
@@ -84,7 +86,7 @@ export function registerBrowserAgentActRoutes(
           case "type": {
             const ref = toStringOrEmpty(body.ref);
             if (!ref) {
-              return jsonError(res, 400, "ref is required");
+              return jsonError(res, 400, missingRefMessage(kind));
             }
             if (typeof body.text !== "string") {
               return jsonError(res, 400, "text is required");
@@ -124,7 +126,7 @@ export function registerBrowserAgentActRoutes(
           case "hover": {
             const ref = toStringOrEmpty(body.ref);
             if (!ref) {
-              return jsonError(res, 400, "ref is required");
+              return jsonError(res, 400, missingRefMessage(kind));
             }
             const timeoutMs = toNumber(body.timeoutMs);
             await pw.hoverViaPlaywright({
@@ -138,7 +140,7 @@ export function registerBrowserAgentActRoutes(
           case "scrollIntoView": {
             const ref = toStringOrEmpty(body.ref);
             if (!ref) {
-              return jsonError(res, 400, "ref is required");
+              return jsonError(res, 400, missingRefMessage(kind));
             }
             const timeoutMs = toNumber(body.timeoutMs);
             const scrollRequest: Parameters<typeof pw.scrollIntoViewViaPlaywright>[0] = {

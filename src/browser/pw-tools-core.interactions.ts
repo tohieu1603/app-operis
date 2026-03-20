@@ -9,6 +9,7 @@ import {
   restoreRoleRefsForTarget,
 } from "./pw-session.js";
 import { normalizeTimeoutMs, requireRef, toAIFriendlyError } from "./pw-tools-core.shared.js";
+import { withTransientRetry } from "./pw-retry.js";
 
 type TargetOpts = {
   cdpUrl: string;
@@ -70,19 +71,21 @@ export async function clickViaPlaywright(opts: {
   const locator = refLocator(page, ref);
   const timeout = resolveInteractionTimeoutMs(opts.timeoutMs);
   try {
-    if (opts.doubleClick) {
-      await locator.dblclick({
-        timeout,
-        button: opts.button,
-        modifiers: opts.modifiers,
-      });
-    } else {
-      await locator.click({
-        timeout,
-        button: opts.button,
-        modifiers: opts.modifiers,
-      });
-    }
+    await withTransientRetry(async () => {
+      if (opts.doubleClick) {
+        await locator.dblclick({
+          timeout,
+          button: opts.button,
+          modifiers: opts.modifiers,
+        });
+      } else {
+        await locator.click({
+          timeout,
+          button: opts.button,
+          modifiers: opts.modifiers,
+        });
+      }
+    });
   } catch (err) {
     throw toAIFriendlyError(err, ref);
   }
@@ -97,8 +100,10 @@ export async function hoverViaPlaywright(opts: {
   const ref = requireRef(opts.ref);
   const page = await getRestoredPageForTarget(opts);
   try {
-    await refLocator(page, ref).hover({
-      timeout: resolveInteractionTimeoutMs(opts.timeoutMs),
+    await withTransientRetry(async () => {
+      await refLocator(page, ref).hover({
+        timeout: resolveInteractionTimeoutMs(opts.timeoutMs),
+      });
     });
   } catch (err) {
     throw toAIFriendlyError(err, ref);
@@ -119,8 +124,10 @@ export async function dragViaPlaywright(opts: {
   }
   const page = await getRestoredPageForTarget(opts);
   try {
-    await refLocator(page, startRef).dragTo(refLocator(page, endRef), {
-      timeout: resolveInteractionTimeoutMs(opts.timeoutMs),
+    await withTransientRetry(async () => {
+      await refLocator(page, startRef).dragTo(refLocator(page, endRef), {
+        timeout: resolveInteractionTimeoutMs(opts.timeoutMs),
+      });
     });
   } catch (err) {
     throw toAIFriendlyError(err, `${startRef} -> ${endRef}`);
@@ -140,8 +147,10 @@ export async function selectOptionViaPlaywright(opts: {
   }
   const page = await getRestoredPageForTarget(opts);
   try {
-    await refLocator(page, ref).selectOption(opts.values, {
-      timeout: resolveInteractionTimeoutMs(opts.timeoutMs),
+    await withTransientRetry(async () => {
+      await refLocator(page, ref).selectOption(opts.values, {
+        timeout: resolveInteractionTimeoutMs(opts.timeoutMs),
+      });
     });
   } catch (err) {
     throw toAIFriendlyError(err, ref);
@@ -180,15 +189,17 @@ export async function typeViaPlaywright(opts: {
   const locator = refLocator(page, ref);
   const timeout = resolveInteractionTimeoutMs(opts.timeoutMs);
   try {
-    if (opts.slowly) {
-      await locator.click({ timeout });
-      await locator.type(text, { timeout, delay: 75 });
-    } else {
-      await locator.fill(text, { timeout });
-    }
-    if (opts.submit) {
-      await locator.press("Enter", { timeout });
-    }
+    await withTransientRetry(async () => {
+      if (opts.slowly) {
+        await locator.click({ timeout });
+        await locator.type(text, { timeout, delay: 75 });
+      } else {
+        await locator.fill(text, { timeout });
+      }
+      if (opts.submit) {
+        await locator.press("Enter", { timeout });
+      }
+    });
   } catch (err) {
     throw toAIFriendlyError(err, ref);
   }
