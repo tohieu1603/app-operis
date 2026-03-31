@@ -5,7 +5,16 @@
       "Bash(git checkout:*)",
       "Bash(node scripts/bundle-gateway.js)",
       "Bash(pnpm build:electron)",
-      "Bash(pnpm build:installer-ws)"
+      "Bash(pnpm build:installer-ws)",
+      "Read(//c/Users/hung6/.operis/**)",
+      "Read(//c/Users/hung6/.openclaw/**)",
+      "Bash(pnpm build:*)",
+      "Bash(npx vitest:*)",
+      "Bash(find d:/Project/SourceCode/agent.operis -maxdepth 2 -name .env*)",
+      "Bash(find d:/Project/SourceCode/agent.operis/apps -maxdepth 3 -name *.json)",
+      "Bash(\"d:/Project/SourceCode/agent.operis/.env\")",
+      "Bash(export ANTHROPIC_API_KEY=\"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\")",
+      "Bash(pnpm build:claude)"
     ]
   }
 }
