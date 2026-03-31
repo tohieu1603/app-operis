@@ -16,6 +16,11 @@ function resolvePowerShellPath(): string {
       return candidate;
     }
   }
+  // Fallback: try well-known path when env vars are missing (e.g. Electron packaged builds)
+  const hardcoded = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+  if (fs.existsSync(hardcoded)) {
+    return hardcoded;
+  }
   return "powershell.exe";
 }
 

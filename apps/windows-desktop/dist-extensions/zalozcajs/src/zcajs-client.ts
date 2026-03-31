@@ -232,6 +232,14 @@ export function disconnectInstance(credentialsPath: string): void {
     }
     apiInstances.delete(path);
   }
+  // Delete credentials file for a full logout
+  try {
+    if (existsSync(path)) {
+      fs.unlink(path).catch(() => {});
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 export async function getApiInstance(credentialsPath: string): Promise<ZcaJsApiInstance | null> {

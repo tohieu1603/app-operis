@@ -1,15 +1,11 @@
 import { clearDeviceAuthToken, loadDeviceAuthToken, storeDeviceAuthToken } from "./device-auth";
-/**
- * Gateway WebSocket Client for Client-Web
- * Full version with device authentication (like admin UI)
- */
 import { loadOrCreateDeviceIdentity, signDevicePayload } from "./device-identity";
 
 function generateUUID(): string {
   return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-// Build device auth payload for signing
+// Build device auth payload for signing (inlined from src/gateway/device-auth)
 function buildDeviceAuthPayload(params: {
   deviceId: string;
   clientId: string;
@@ -39,11 +35,16 @@ function buildDeviceAuthPayload(params: {
   return base.join("|");
 }
 
+// ---------------------------------------------------------------------------
+// Types — copied 1:1 from openclaw2 ui/src/ui/gateway.ts
+// ---------------------------------------------------------------------------
+
 export type GatewayEventFrame = {
   type: "event";
   event: string;
   payload?: unknown;
   seq?: number;
+  stateVersion?: { presence: number; health: number };
 };
 
 export type GatewayResponseFrame = {
@@ -54,9 +55,31 @@ export type GatewayResponseFrame = {
   error?: { code: string; message: string; details?: unknown };
 };
 
+export type GatewayErrorInfo = {
+  code: string;
+  message: string;
+  details?: unknown;
+};
+
+export class GatewayRequestError extends Error {
+  readonly gatewayCode: string;
+  readonly details?: unknown;
+
+  constructor(error: GatewayErrorInfo) {
+    super(error.message);
+    this.name = "GatewayRequestError";
+    this.gatewayCode = error.code;
+    this.details = error.details;
+  }
+}
+
 export type GatewayHelloOk = {
   type: "hello-ok";
   protocol: number;
+  server?: {
+    version?: string;
+    connId?: string;
+  };
   features?: { methods?: string[]; events?: string[] };
   snapshot?: unknown;
   auth?: {
@@ -65,6 +88,7 @@ export type GatewayHelloOk = {
     scopes?: string[];
     issuedAtMs?: number;
   };
+  policy?: { tickIntervalMs?: number };
 };
 
 type Pending = {
@@ -72,34 +96,43 @@ type Pending = {
   reject: (err: unknown) => void;
 };
 
-export type GatewayClientOptions = {
+export type GatewayBrowserClientOptions = {
   url: string;
   token?: string;
+  password?: string;
+  clientName?: string;
+  clientVersion?: string;
+  platform?: string;
+  mode?: string;
+  instanceId?: string;
   onHello?: (hello: GatewayHelloOk) => void;
   onEvent?: (evt: GatewayEventFrame) => void;
-  onClose?: (info: { code: number; reason: string }) => void;
-  onConnected?: () => void;
-  /** Fired when reconnecting after a previous successful connection (not the first connect). */
-  onReconnected?: () => void;
+  onClose?: (info: { code: number; reason: string; error?: GatewayErrorInfo }) => void;
+  onGap?: (info: { expected: number; received: number }) => void;
 };
 
-const CLIENT_ID = "openclaw-control-ui";
-const CLIENT_MODE = "ui";
-const ROLE = "operator";
-const SCOPES = ["operator.admin", "operator.approvals", "operator.pairing"];
+// ---------------------------------------------------------------------------
+// GatewayBrowserClient — copied 1:1 from openclaw2 ui/src/ui/gateway.ts
+// ---------------------------------------------------------------------------
 
-export class GatewayClient {
+// 4008 = application-defined code (browser rejects 1008 "Policy Violation")
+const CONNECT_FAILED_CLOSE_CODE = 4008;
+
+const CLIENT_NAME = "openclaw-control-ui";
+const CLIENT_MODE = "webchat";
+
+export class GatewayBrowserClient {
   private ws: WebSocket | null = null;
   private pending = new Map<string, Pending>();
   private closed = false;
+  private lastSeq: number | null = null;
   private connectNonce: string | null = null;
   private connectSent = false;
   private connectTimer: number | null = null;
   private backoffMs = 800;
-  private _connected = false;
-  private _hasConnectedOnce = false;
+  private pendingConnectError: GatewayErrorInfo | undefined;
 
-  constructor(private opts: GatewayClientOptions) {}
+  constructor(private opts: GatewayBrowserClientOptions) {}
 
   start() {
     this.closed = false;
@@ -110,49 +143,55 @@ export class GatewayClient {
     this.closed = true;
     this.ws?.close();
     this.ws = null;
-    this._connected = false;
+    this.pendingConnectError = undefined;
     this.flushPending(new Error("gateway client stopped"));
   }
 
   get connected() {
-    return this._connected && this.ws?.readyState === WebSocket.OPEN;
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 
   private connect() {
-    if (this.closed) return;
+    if (this.closed) {
+      return;
+    }
     this.ws = new WebSocket(this.opts.url);
-    this.ws.onopen = () => {
-      this.backoffMs = 800; // reset backoff: server is reachable
-      this.queueConnect();
-    };
-    this.ws.onmessage = (ev) => this.handleMessage(String(ev.data ?? ""));
-    this.ws.onclose = (ev) => {
+    this.ws.addEventListener("open", () => this.queueConnect());
+    this.ws.addEventListener("message", (ev) => this.handleMessage(String(ev.data ?? "")));
+    this.ws.addEventListener("close", (ev) => {
       const reason = String(ev.reason ?? "");
+      const connectError = this.pendingConnectError;
+      this.pendingConnectError = undefined;
       this.ws = null;
-      this._connected = false;
       this.flushPending(new Error(`gateway closed (${ev.code}): ${reason}`));
-      this.opts.onClose?.({ code: ev.code, reason });
+      this.opts.onClose?.({ code: ev.code, reason, error: connectError });
       this.scheduleReconnect();
-    };
-    this.ws.onerror = () => {
+    });
+    this.ws.addEventListener("error", () => {
       // ignored; close handler will fire
-    };
+    });
   }
 
   private scheduleReconnect() {
-    if (this.closed) return;
+    if (this.closed) {
+      return;
+    }
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 1.7, 15_000);
     window.setTimeout(() => this.connect(), delay);
   }
 
   private flushPending(err: Error) {
-    for (const [, p] of this.pending) p.reject(err);
+    for (const [, p] of this.pending) {
+      p.reject(err);
+    }
     this.pending.clear();
   }
 
   private async sendConnect() {
-    if (this.connectSent) return;
+    if (this.connectSent) {
+      return;
+    }
     this.connectSent = true;
     if (this.connectTimer !== null) {
       window.clearTimeout(this.connectTimer);
@@ -160,24 +199,33 @@ export class GatewayClient {
     }
 
     // crypto.subtle is only available in secure contexts (HTTPS, localhost).
+    // Over plain HTTP, we skip device identity and fall back to token-only auth.
+    // Gateways may reject this unless gateway.controlUi.allowInsecureAuth is enabled.
     const isSecureContext = typeof crypto !== "undefined" && !!crypto.subtle;
 
+    const scopes = ["operator.admin", "operator.approvals", "operator.pairing"];
+    const role = "operator";
     let deviceIdentity: Awaited<ReturnType<typeof loadOrCreateDeviceIdentity>> | null = null;
-    let canFallbackToShared = false;
     let authToken = this.opts.token;
 
     if (isSecureContext) {
       deviceIdentity = await loadOrCreateDeviceIdentity();
-      const storedToken = loadDeviceAuthToken({
-        deviceId: deviceIdentity.deviceId,
-        role: ROLE,
-      })?.token;
-      // Prefer fresh URL token over stored device token (may be stale from previous session)
-      authToken = this.opts.token ?? storedToken;
-      canFallbackToShared = Boolean(storedToken && this.opts.token);
+      // Only use stored device token when no URL token is available
+      if (!authToken) {
+        const storedToken = loadDeviceAuthToken({
+          deviceId: deviceIdentity.deviceId,
+          role,
+        })?.token;
+        authToken = storedToken;
+      }
     }
-
-    const auth = authToken ? { token: authToken } : undefined;
+    const auth =
+      authToken || this.opts.password
+        ? {
+            token: authToken,
+            password: this.opts.password,
+          }
+        : undefined;
 
     let device:
       | {
@@ -185,19 +233,19 @@ export class GatewayClient {
           publicKey: string;
           signature: string;
           signedAt: number;
-          nonce: string | undefined;
+          nonce: string;
         }
       | undefined;
 
     if (isSecureContext && deviceIdentity) {
       const signedAtMs = Date.now();
-      const nonce = this.connectNonce ?? undefined;
+      const nonce = this.connectNonce ?? "";
       const payload = buildDeviceAuthPayload({
         deviceId: deviceIdentity.deviceId,
-        clientId: CLIENT_ID,
-        clientMode: CLIENT_MODE,
-        role: ROLE,
-        scopes: SCOPES,
+        clientId: this.opts.clientName ?? CLIENT_NAME,
+        clientMode: this.opts.mode ?? CLIENT_MODE,
+        role,
+        scopes,
         signedAtMs,
         token: authToken ?? null,
         nonce,
@@ -211,20 +259,20 @@ export class GatewayClient {
         nonce,
       };
     }
-
     const params = {
       minProtocol: 3,
       maxProtocol: 3,
       client: {
-        id: CLIENT_ID,
-        version: "1.0.0",
-        platform: navigator.platform ?? "web",
-        mode: CLIENT_MODE,
+        id: this.opts.clientName ?? CLIENT_NAME,
+        version: this.opts.clientVersion ?? "dev",
+        platform: this.opts.platform ?? navigator.platform ?? "web",
+        mode: this.opts.mode ?? CLIENT_MODE,
+        instanceId: this.opts.instanceId,
       },
-      role: ROLE,
-      scopes: SCOPES,
+      role,
+      scopes,
       device,
-      caps: ["tool-events"],
+      caps: [],
       auth,
       userAgent: navigator.userAgent,
       locale: navigator.language,
@@ -235,24 +283,29 @@ export class GatewayClient {
         if (hello?.auth?.deviceToken && deviceIdentity) {
           storeDeviceAuthToken({
             deviceId: deviceIdentity.deviceId,
-            role: hello.auth.role ?? ROLE,
+            role: hello.auth.role ?? role,
             token: hello.auth.deviceToken,
             scopes: hello.auth.scopes ?? [],
           });
         }
         this.backoffMs = 800;
-        const isReconnect = this._hasConnectedOnce;
-        this._connected = true;
-        this._hasConnectedOnce = true;
         this.opts.onHello?.(hello);
-        this.opts.onConnected?.();
-        if (isReconnect) this.opts.onReconnected?.();
       })
-      .catch(() => {
-        if (canFallbackToShared && deviceIdentity) {
-          clearDeviceAuthToken({ deviceId: deviceIdentity.deviceId, role: ROLE });
+      .catch((err: unknown) => {
+        if (err instanceof GatewayRequestError) {
+          this.pendingConnectError = {
+            code: err.gatewayCode,
+            message: err.message,
+            details: err.details,
+          };
+        } else {
+          this.pendingConnectError = undefined;
         }
-        this.ws?.close(4008, "connect failed");
+        // Always clear stale device token on connect failure
+        if (deviceIdentity) {
+          clearDeviceAuthToken({ deviceId: deviceIdentity.deviceId, role });
+        }
+        this.ws?.close(CONNECT_FAILED_CLOSE_CODE, "connect failed");
       });
   }
 
@@ -276,6 +329,13 @@ export class GatewayClient {
         }
         return;
       }
+      const seq = typeof evt.seq === "number" ? evt.seq : null;
+      if (seq !== null) {
+        if (this.lastSeq !== null && seq > this.lastSeq + 1) {
+          this.opts.onGap?.({ expected: this.lastSeq + 1, received: seq });
+        }
+        this.lastSeq = seq;
+      }
       try {
         this.opts.onEvent?.(evt);
       } catch (err) {
@@ -287,35 +347,33 @@ export class GatewayClient {
     if (frame.type === "res") {
       const res = parsed as GatewayResponseFrame;
       const pending = this.pending.get(res.id);
-      if (!pending) return;
+      if (!pending) {
+        return;
+      }
       this.pending.delete(res.id);
-      if (res.ok) pending.resolve(res.payload);
-      else pending.reject(new Error(res.error?.message ?? "request failed"));
+      if (res.ok) {
+        pending.resolve(res.payload);
+      } else {
+        pending.reject(
+          new GatewayRequestError({
+            code: res.error?.code ?? "UNAVAILABLE",
+            message: res.error?.message ?? "request failed",
+            details: res.error?.details,
+          }),
+        );
+      }
       return;
     }
   }
 
-  request<T = unknown>(method: string, params?: unknown, timeoutMs = 10000): Promise<T> {
+  request<T = unknown>(method: string, params?: unknown): Promise<T> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("gateway not connected"));
     }
     const id = generateUUID();
     const frame = { type: "req", id, method, params };
     const p = new Promise<T>((resolve, reject) => {
-      const timer = window.setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Request timeout: ${method}`));
-      }, timeoutMs);
-      this.pending.set(id, {
-        resolve: (v) => {
-          window.clearTimeout(timer);
-          resolve(v as T);
-        },
-        reject: (err) => {
-          window.clearTimeout(timer);
-          reject(err);
-        },
-      });
+      this.pending.set(id, { resolve: (v) => resolve(v as T), reject });
     });
     this.ws.send(JSON.stringify(frame));
     return p;
@@ -324,12 +382,21 @@ export class GatewayClient {
   private queueConnect() {
     this.connectNonce = null;
     this.connectSent = false;
-    if (this.connectTimer !== null) window.clearTimeout(this.connectTimer);
+    if (this.connectTimer !== null) {
+      window.clearTimeout(this.connectTimer);
+    }
     this.connectTimer = window.setTimeout(() => {
       void this.sendConnect();
     }, 750);
   }
 }
+
+// Keep GatewayClient as alias for backward compatibility with rest of client-web2
+export { GatewayBrowserClient as GatewayClient };
+
+// ---------------------------------------------------------------------------
+// Event types (client-web2 specific pub/sub infrastructure)
+// ---------------------------------------------------------------------------
 
 // Agent tool event from gateway (stream: "tool")
 export type ToolEvent = {
@@ -418,13 +485,16 @@ export type ChatStreamEvent = {
   errorMessage?: string;
 };
 
+// ---------------------------------------------------------------------------
+// Pub/sub event listeners
+// ---------------------------------------------------------------------------
+
 // Event listeners for cron events
 type CronEventListener = (event: CronEvent) => void;
 const cronEventListeners = new Set<CronEventListener>();
 
 export function subscribeToCronEvents(listener: CronEventListener): () => void {
   cronEventListeners.add(listener);
-  // Ensure gateway client is started to receive events
   getGatewayClient();
   return () => cronEventListeners.delete(listener);
 }
@@ -449,7 +519,6 @@ export type LifecycleEvent = {
   };
 };
 
-// Event listeners for lifecycle events
 type LifecycleEventListener = (event: LifecycleEvent) => void;
 const lifecycleEventListeners = new Set<LifecycleEventListener>();
 
@@ -495,7 +564,6 @@ const chatStreamListeners = new Set<ChatStreamListener>();
 
 export function subscribeToChatStream(listener: ChatStreamListener): () => void {
   chatStreamListeners.add(listener);
-  // Ensure gateway client is started to receive events
   getGatewayClient();
   return () => chatStreamListeners.delete(listener);
 }
@@ -543,44 +611,43 @@ export function onGatewayReconnect(listener: ReconnectListener): () => void {
   return () => reconnectListeners.delete(listener);
 }
 
-// Singleton instance
-let client: GatewayClient | null = null;
+// ---------------------------------------------------------------------------
+// Singleton instance + helpers
+// ---------------------------------------------------------------------------
+
+let client: GatewayBrowserClient | null = null;
 let connectionPromise: Promise<void> | null = null;
 
-// Get token from URL query param or env
 function getGatewayToken(): string | undefined {
   const params = new URLSearchParams(window.location.search);
-  return params.get("token") ?? import.meta.env.VITE_GATEWAY_TOKEN ?? undefined;
+  return params.get("token") ?? undefined;
 }
 
-// Get WebSocket URL - use VITE_GATEWAY_WS or derive from current location
 function getGatewayWsUrl(): string {
-  // If env var is set, use it
   if (import.meta.env.VITE_GATEWAY_WS) {
     return import.meta.env.VITE_GATEWAY_WS;
   }
-  // If running on gateway port directly, use current host
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
-  // Electron file:// or dev server (port 5173) - connect to local gateway
   if (!host || window.location.protocol === "file:" || host.includes(":5173")) {
     return "ws://127.0.0.1:18789/";
   }
   return `${protocol}//${host}/`;
 }
 
-export function getGatewayClient(): GatewayClient {
+export function getGatewayClient(): GatewayBrowserClient {
   if (!client) {
     const wsUrl = getGatewayWsUrl();
 
-    client = new GatewayClient({
+    client = new GatewayBrowserClient({
       url: wsUrl,
       token: getGatewayToken(),
-      onConnected: () => {
-        console.log("[gateway] connected");
-      },
-      onReconnected: () => {
-        console.log("[gateway] reconnected — notifying listeners");
+      mode: CLIENT_MODE,
+      clientName: CLIENT_NAME,
+      onHello: (hello) => {
+        console.log("[gateway] connected", hello.server?.version ?? "");
+        // Notify reconnect listeners on every connect (including first)
+        // so sessions/chat data load as soon as WS is ready
         for (const listener of reconnectListeners) {
           try {
             listener();
@@ -592,19 +659,35 @@ export function getGatewayClient(): GatewayClient {
       onClose: ({ code, reason }) => {
         console.log(`[gateway] closed: ${code} ${reason}`);
       },
+      onGap: ({ expected, received }) => {
+        console.warn(`[gateway] seq gap: expected ${expected}, got ${received}`);
+        // Trigger reconnect listeners so chat reloads history
+        for (const listener of reconnectListeners) {
+          try {
+            listener();
+          } catch {}
+        }
+      },
       onEvent: (evt) => {
         // Handle cron events
         if (evt.event === "cron" && evt.payload) {
           notifyCronListeners(evt.payload as CronEvent);
         }
-        // Handle chat streaming events
+        // Handle chat streaming events (validate required fields)
         if (evt.event === "chat" && evt.payload) {
-          notifyChatStreamListeners(evt.payload as ChatStreamEvent);
+          const cp = evt.payload as Record<string, unknown>;
+          if (typeof cp.runId === "string" && typeof cp.state === "string") {
+            notifyChatStreamListeners(evt.payload as ChatStreamEvent);
+          }
         }
         // Handle agent events (tool + lifecycle + compaction streams)
         if (evt.event === "agent" && evt.payload) {
-          const p = evt.payload as { stream?: string; data?: Record<string, unknown> };
-          if (p.stream === "tool") {
+          const p = evt.payload as {
+            stream?: string;
+            data?: Record<string, unknown>;
+            runId?: string;
+          };
+          if (p.stream === "tool" && typeof p.runId === "string") {
             notifyToolListeners(evt.payload as ToolEvent);
           } else if (p.stream === "lifecycle") {
             notifyLifecycleListeners(evt.payload as LifecycleEvent);
@@ -622,6 +705,15 @@ export function getGatewayClient(): GatewayClient {
   return client;
 }
 
+/** Debug: force WS disconnect to test reconnect behavior. Call from console: window.__forceDisconnect() */
+export function forceDisconnectForDebug() {
+  if (client) {
+    console.warn("[gateway] forcing WS disconnect for debug");
+    (client as unknown as { ws: WebSocket | null }).ws?.close(4000, "debug disconnect");
+  }
+}
+(window as unknown as Record<string, unknown>).__forceDisconnect = forceDisconnectForDebug;
+
 export function stopGatewayClient() {
   if (client) {
     client.stop();
@@ -630,7 +722,7 @@ export function stopGatewayClient() {
   connectionPromise = null;
 }
 
-export async function waitForConnection(timeoutMs = 5000): Promise<GatewayClient> {
+export async function waitForConnection(timeoutMs = 5000): Promise<GatewayBrowserClient> {
   const c = getGatewayClient();
   if (c.connected) return c;
 
@@ -648,7 +740,6 @@ export async function waitForConnection(timeoutMs = 5000): Promise<GatewayClient
       };
       check();
     }).finally(() => {
-      // Always reset so next call creates a fresh promise
       connectionPromise = null;
     });
   }

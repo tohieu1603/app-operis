@@ -160,18 +160,18 @@ export class GatewayClient {
     const isSecureContext = typeof crypto !== "undefined" && !!crypto.subtle;
 
     let deviceIdentity: Awaited<ReturnType<typeof loadOrCreateDeviceIdentity>> | null = null;
-    let canFallbackToShared = false;
     let authToken = this.opts.token;
 
     if (isSecureContext) {
       deviceIdentity = await loadOrCreateDeviceIdentity();
-      const storedToken = loadDeviceAuthToken({
-        deviceId: deviceIdentity.deviceId,
-        role: ROLE,
-      })?.token;
-      // Prefer fresh URL token over stored device token (may be stale from previous session)
-      authToken = this.opts.token ?? storedToken;
-      canFallbackToShared = Boolean(storedToken && this.opts.token);
+      // Only use stored device token when no URL token is available
+      if (!authToken) {
+        const storedToken = loadDeviceAuthToken({
+          deviceId: deviceIdentity.deviceId,
+          role: ROLE,
+        })?.token;
+        authToken = storedToken;
+      }
     }
 
     const auth = authToken ? { token: authToken } : undefined;
@@ -243,7 +243,7 @@ export class GatewayClient {
         this.opts.onConnected?.();
       })
       .catch(() => {
-        if (canFallbackToShared && deviceIdentity) {
+        if (deviceIdentity) {
           clearDeviceAuthToken({ deviceId: deviceIdentity.deviceId, role: ROLE });
         }
         this.ws?.close(4008, "connect failed");
@@ -480,7 +480,7 @@ let connectionPromise: Promise<void> | null = null;
 // Get token from URL query param or env
 function getGatewayToken(): string | undefined {
   const params = new URLSearchParams(window.location.search);
-  return params.get("token") ?? import.meta.env.VITE_GATEWAY_TOKEN ?? undefined;
+  return params.get("token") ?? undefined;
 }
 
 // Get WebSocket URL - use VITE_GATEWAY_WS or derive from current location

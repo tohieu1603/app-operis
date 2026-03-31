@@ -2,31 +2,46 @@ import { LitElement, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import type {
   AgentsListResult,
-  AgentFileEntry,
   AgentsFilesListResult,
   AgentIdentityResult,
   SkillStatusReport,
   SkillMessageMap,
   DevicePairingList,
-  PendingDevice,
-  PairedDevice,
   NodeInfo,
   ChannelsStatusSnapshot,
   CronJob,
   CronStatus,
 } from "./agent-types";
+import type { DailyUsage, TypeUsage, UsageStats } from "./analytics-api";
+import type { PricingTier, DepositOrder } from "./deposits-api";
+import type { FeedbackReport } from "./report-api";
+import type { UserProfile } from "./user-api";
+import type { PendingImage, ChatMessage } from "./views/chat/chat-types";
 import type { ReportFormState } from "./views/report";
+import type { WorkflowStatus } from "./workflow-api";
 import type { Workflow, WorkflowFormState, CronProgressState } from "./workflow-types";
+import * as agents from "./app-agents-actions";
+import * as analytics from "./app-analytics-actions";
+// Domain action modules
+import * as billing from "./app-billing-actions";
+import * as channel from "./app-channel-actions";
 import {
-  getDailyUsage,
-  getRangeUsage,
-  transformDailyUsage,
-  transformTypeUsage,
-  transformStats,
-  type DailyUsage,
-  type TypeUsage,
-  type UsageStats,
-} from "./analytics-api";
+  handleSendMessage as chatSendMessage,
+  handleStopChat as chatStopChat,
+  removeQueuedMessage as chatRemoveQueuedMessage,
+  cacheChatMessages as chatCacheMsgs,
+  restoreCachedMessages as chatRestoreMsgs,
+} from "./app-chat";
+import * as config from "./app-config-actions";
+import {
+  handleChatStreamEvent as gwHandleChatStream,
+  handleToolEvent as gwHandleTool,
+  handleLifecycleEvent as gwHandleLifecycle,
+  handleCompactionEvent as gwHandleCompaction,
+  handleReconnect as gwHandleReconnect,
+} from "./app-gateway";
+import * as settings from "./app-settings-actions";
+import * as workflow from "./app-workflow-actions";
 import {
   login as authLogin,
   logout as authLogout,
@@ -38,9 +53,7 @@ import {
 } from "./auth-api";
 import {
   getChannelsStatus,
-  isChannelConfigured,
   saveTelegramBotToken,
-  startZaloQrLogin,
   waitZaloQrLogin,
   disconnectChannel,
   CHANNEL_DEFINITIONS,
@@ -50,16 +63,7 @@ import {
 import { getConversations, deleteConversation, type Conversation } from "./chat-api";
 import { showConfirm } from "./components/operis-confirm";
 import { showToast } from "./components/operis-toast";
-import {
-  getPricing,
-  createDeposit,
-  getPendingDeposit,
-  getDeposit,
-  cancelDeposit,
-  getDepositHistory,
-  type PricingTier,
-  type DepositOrder,
-} from "./deposits-api";
+import { loadChatHistory } from "./controllers/chat";
 import {
   subscribeToCronEvents,
   subscribeToChatStream,
@@ -68,7 +72,6 @@ import {
   subscribeToCompactionEvents,
   stopGatewayClient,
   waitForConnection,
-  getGatewayClient,
   onGatewayReconnect,
   type CronEvent,
   type ChatStreamEvent,
@@ -79,7 +82,6 @@ import {
 import { t } from "./i18n";
 import { icons } from "./icons";
 import { NAV_ITEMS, pathForTab, tabFromPath, type Tab } from "./navigation";
-import { createReport, getMyReports, getAllReports, type FeedbackReport } from "./report-api";
 import { loadSettings, saveSettings, type ClientSettings } from "./storage";
 import {
   resolveTheme,
@@ -89,16 +91,20 @@ import {
   type ResolvedTheme,
 } from "./theme";
 import { startThemeTransition, type ThemeTransitionContext } from "./theme-transition";
-import { getTokenBalance } from "./tokens-api";
 import { startUsageTracker, stopUsageTracker, reportCronUsage } from "./usage-tracker";
-import { getUserProfile, updateUserProfile, changePassword, type UserProfile } from "./user-api";
 import { renderAgents } from "./views/agents";
 import { renderAnalytics } from "./views/analytics";
 import { renderBilling } from "./views/billing";
 import { renderChannels } from "./views/channels";
-import { renderChat, type PendingImage } from "./views/chat";
+import { renderChat } from "./views/chatsend/chat-view";
 import { renderDocs } from "./views/docs";
 import { renderLogin } from "./views/login";
+// Register custom components
+import "./components/operis-input";
+import "./components/operis-select";
+import "./components/operis-modal";
+import "./components/operis-datetime-picker";
+import "./components/operis-confirm";
 import { renderLogs, type LogEntry } from "./views/logs";
 import { renderNodes } from "./views/nodes";
 import { renderReportView } from "./views/report";
@@ -106,24 +112,6 @@ import { renderSessions } from "./views/sessions";
 import { renderSettings } from "./views/settings";
 import { renderSkills } from "./views/skills";
 import { renderWorkflow } from "./views/workflow";
-import {
-  listWorkflows,
-  createWorkflow,
-  updateWorkflow,
-  toggleWorkflow,
-  runWorkflow,
-  deleteWorkflow,
-  getWorkflowRuns,
-  getWorkflowStatus,
-  seedDefaultWorkflows,
-  type WorkflowStatus,
-} from "./workflow-api";
-// Register custom components
-import "./components/operis-input";
-import "./components/operis-select";
-import "./components/operis-modal";
-import "./components/operis-datetime-picker";
-import "./components/operis-confirm";
 import { DEFAULT_WORKFLOW_FORM } from "./workflow-types";
 
 // Get page title
@@ -150,7 +138,7 @@ function titleForTab(tab: Tab): string {
 // Get page subtitle
 function subtitleForTab(tab: Tab): string {
   const subtitles: Record<Tab, string> = {
-    chat: "Phiên chat trực tiếp với gateway",
+    chat: "Trò chuyện trực tiếp với AI",
     analytics: "Xem thống kê sử dụng và chi phí",
     workflow: "Tự động hóa tác vụ với AI theo lịch",
     billing: "Xem sử dụng và quản lý gói",
@@ -175,13 +163,8 @@ export class OperisApp extends LitElement {
   @state() theme: ThemeMode = this.settings.theme ?? "system";
   @state() themeResolved: ResolvedTheme = "dark";
 
-  // Chat state
-  @state() chatMessages: Array<{
-    role: "user" | "assistant";
-    content: string;
-    timestamp?: Date;
-    images?: Array<{ preview: string }>;
-  }> = [];
+  // Chat state (messages use gateway format: content blocks or string)
+  @state() chatMessages: Array<ChatMessage> = [];
   @state() chatDraft = "";
   @state() chatSending = false;
   @state() chatConversationId: string | null = null;
@@ -200,18 +183,23 @@ export class OperisApp extends LitElement {
     output?: string;
   }> = [];
   @state() chatPendingImages: PendingImage[] = [];
+  @state() chatAttachments: Array<{ id: string; dataUrl: string; mimeType: string }> = [];
   // Session token tracking
   @state() chatSessionTokens = 0;
   // Thinking level from gateway session (off | low | medium | high)
   @state() chatThinkingLevel: string | null = null;
   @state() chatTokenBalance = 0;
+  // Available models from gateway
+  @state() chatAvailableModels: Array<{
+    id: string;
+    name: string;
+    provider: string;
+    reasoning?: boolean;
+  }> = [];
+  @state() chatModelsLoading = false;
+  @state() chatCurrentModel: string | null = null;
   // Current chat run ID for abort
-  private chatRunId: string | null = null;
-  // Run dedup maps (matching TUI tui-event-handlers.ts)
-  private finalizedRuns = new Map<string, number>();
-  private sessionRuns = new Map<string, number>();
-  private localRunIds = new Set<string>();
-  private lastTrackedSessionKey: string | null = null;
+  chatRunId: string | null = null;
   // Lifecycle subscription cleanup
   private lifecycleEventUnsubscribe: (() => void) | null = null;
   // Chat queue — messages sent while busy, flushed after final (like original UI)
@@ -223,7 +211,8 @@ export class OperisApp extends LitElement {
   }> = [];
   // Compaction status (agent compressing context)
   @state() chatCompactionActive = false;
-  private compactionClearTimer: ReturnType<typeof setTimeout> | null = null;
+  @state() chatAtBottom = true;
+  compactionClearTimer: ReturnType<typeof setTimeout> | null = null;
   private compactionEventUnsubscribe: (() => void) | null = null;
   // Chat sidebar state
   @state() chatConversations: Conversation[] = [];
@@ -278,6 +267,7 @@ export class OperisApp extends LitElement {
   @state() workflowForm: WorkflowFormState = { ...DEFAULT_WORKFLOW_FORM };
   @state() workflowSaving = false;
   @state() workflowExpandedId: string | null = null;
+  @state() workflowDetailWorkflow: import("./workflow-types").Workflow | null = null;
   @state() runningWorkflowIds: Set<string> = new Set();
   @state() workflowStatus: WorkflowStatus | null = null;
   // Run history state
@@ -373,6 +363,7 @@ export class OperisApp extends LitElement {
     "overview";
   // Agent config state
   @state() agentConfigForm: Record<string, unknown> | null = null;
+  @state() agentConfigBaseHash: string | null = null;
   @state() agentConfigLoading = false;
   @state() agentConfigSaving = false;
   @state() agentConfigDirty = false;
@@ -554,17 +545,7 @@ export class OperisApp extends LitElement {
     // Reload current tab data when gateway WS reconnects after a drop
     // (Original: onHello silently resets orphaned chat run state, then refreshes active tab)
     this.reconnectUnsubscribe = onGatewayReconnect(() => {
-      console.log("[app] gateway reconnected — resetting chat state and reloading");
-      // Reset orphaned chat run state (any in-flight run's final event was lost during disconnect)
-      this.chatRunId = null;
-      this.chatStreamingText = "";
-      this.chatStreamingRunId = null;
-      this.chatToolCalls = [];
-      this.chatSending = false;
-      // Clear run tracking maps (like TUI syncSessionKey on reconnect)
-      this.finalizedRuns.clear();
-      this.sessionRuns.clear();
-      this.localRunIds.clear();
+      gwHandleReconnect(this);
       this.loadTabData(this.tab);
     });
 
@@ -695,404 +676,36 @@ export class OperisApp extends LitElement {
     }
   }
 
-  // --- Run tracking helpers (matching TUI tui-event-handlers.ts) ---
-
-  /** Prune a run map when it exceeds 200 entries (keep 150, evict oldest). */
-  private pruneRunMap(runs: Map<string, number>) {
-    if (runs.size <= 200) return;
-    const keepUntil = Date.now() - 10 * 60 * 1000;
-    for (const [key, ts] of runs) {
-      if (runs.size <= 150) break;
-      if (ts < keepUntil) runs.delete(key);
-    }
-    if (runs.size > 200) {
-      for (const key of runs.keys()) {
-        runs.delete(key);
-        if (runs.size <= 150) break;
-      }
-    }
-  }
-
-  /** Clear run maps when session changes (like TUI syncSessionKey). */
-  private syncRunTracking() {
-    const currentKey = this.chatConversationId || "main";
-    if (currentKey === this.lastTrackedSessionKey) return;
-    this.lastTrackedSessionKey = currentKey;
-    this.finalizedRuns.clear();
-    this.sessionRuns.clear();
-    this.localRunIds.clear();
-  }
-
-  private noteSessionRun(runId: string) {
-    this.sessionRuns.set(runId, Date.now());
-    this.pruneRunMap(this.sessionRuns);
-  }
-
-  private noteFinalizedRun(runId: string) {
-    this.finalizedRuns.set(runId, Date.now());
-    this.sessionRuns.delete(runId);
-    this.localRunIds.delete(runId);
-    this.pruneRunMap(this.finalizedRuns);
-  }
-
-  /** Check if a run is known (active, in-session, or recently finalized). */
-  private isKnownRun(runId: string): boolean {
-    return runId === this.chatRunId || this.sessionRuns.has(runId) || this.finalizedRuns.has(runId);
-  }
+  // --- Event handlers — delegated to app-gateway.ts / app-chat.ts ---
 
   private handleToolEvent(evt: ToolEvent) {
-    // Filter by known runs (like TUI: active + sessionRuns + finalizedRuns)
-    if (!this.isKnownRun(evt.runId)) return;
-    const { phase, toolCallId, name, isError, args, result, partialResult } = evt.data;
-    if (!toolCallId) return;
-
-    const detail = this.extractToolDetail(name, args);
-    // Capture tool output (like original formatToolOutput)
-    const rawOutput = phase === "result" ? result : phase === "update" ? partialResult : undefined;
-    const output = rawOutput !== undefined ? this.formatToolOutput(rawOutput) : undefined;
-
-    const existing = this.chatToolCalls.findIndex((t) => t.id === toolCallId);
-    if (phase === "start" && existing < 0) {
-      this.chatToolCalls = [
-        ...this.chatToolCalls,
-        { id: toolCallId, name: name ?? "tool", phase: "start", detail },
-      ];
-    } else if (existing >= 0) {
-      const updated = [...this.chatToolCalls];
-      updated[existing] = {
-        ...updated[existing],
-        phase,
-        isError,
-        ...(detail ? { detail } : {}),
-        ...(output !== undefined ? { output } : {}),
-      };
-      this.chatToolCalls = updated;
-    }
-
-    // Trim to 50 entries max (like original TOOL_STREAM_LIMIT)
-    if (this.chatToolCalls.length > 50) {
-      this.chatToolCalls = this.chatToolCalls.slice(-50);
-    }
-  }
-
-  /** Format tool output to string (like original formatToolOutput). */
-  private formatToolOutput(value: unknown): string | undefined {
-    if (value === null || value === undefined) return undefined;
-    if (typeof value === "string") return value.slice(0, 120_000);
-    if (typeof value === "number" || typeof value === "boolean") return String(value);
-    // Extract text from content blocks
-    if (typeof value === "object") {
-      const rec = value as Record<string, unknown>;
-      if (typeof rec.text === "string") return rec.text.slice(0, 120_000);
-      if (Array.isArray(rec.content)) {
-        const parts = (rec.content as Array<Record<string, unknown>>)
-          .filter((item) => item.type === "text" && typeof item.text === "string")
-          .map((item) => item.text as string);
-        if (parts.length > 0) return parts.join("\n").slice(0, 120_000);
-      }
-    }
-    try {
-      return JSON.stringify(value, null, 2).slice(0, 120_000);
-    } catch {
-      return String(value);
-    }
-  }
-
-  /** Extract a short human-readable detail from tool args (e.g. "navigate · google.com") */
-  private extractToolDetail(name: string | undefined, args: unknown): string | undefined {
-    if (!args || typeof args !== "object") return undefined;
-    const a = args as Record<string, unknown>;
-
-    // Browser tool: action + url/value
-    if (name === "browser") {
-      const action = typeof a.action === "string" ? a.action : undefined;
-      if (!action) return undefined;
-      const url = typeof a.url === "string" ? a.url : undefined;
-      if (url) {
-        try {
-          const host = new URL(url).hostname.replace(/^www\./, "");
-          return `${action} · ${host}`;
-        } catch {
-          return `${action} · ${url.slice(0, 40)}`;
-        }
-      }
-      const value = typeof a.value === "string" ? a.value : undefined;
-      if (value) return `${action} · ${value.slice(0, 40)}`;
-      const ref = typeof a.ref === "string" ? a.ref : undefined;
-      if (ref) return `${action} · ${ref}`;
-      return action;
-    }
-
-    // Shell/bash tools: show command snippet
-    if (name === "shell" || name === "bash" || name === "execute_command") {
-      const cmd = typeof a.command === "string" ? a.command : undefined;
-      if (cmd) return cmd.length > 50 ? cmd.slice(0, 47) + "…" : cmd;
-    }
-
-    // File tools: show path
-    if (name === "read_file" || name === "write_file" || name === "edit_file") {
-      const path =
-        typeof a.path === "string"
-          ? a.path
-          : typeof a.file_path === "string"
-            ? a.file_path
-            : undefined;
-      if (path) {
-        const short = path.split("/").slice(-2).join("/");
-        return short;
-      }
-    }
-
-    // Search tools
-    if (name === "search" || name === "grep" || name === "web_search") {
-      const query =
-        typeof a.query === "string"
-          ? a.query
-          : typeof a.pattern === "string"
-            ? a.pattern
-            : undefined;
-      if (query) return query.length > 50 ? query.slice(0, 47) + "…" : query;
-    }
-
-    // Generic: try action field
-    const action = typeof a.action === "string" ? a.action : undefined;
-    if (action) return action;
-
-    return undefined;
+    gwHandleTool(this, evt);
   }
 
   private handleChatStreamEvent(evt: ChatStreamEvent) {
-    // SSE streaming sets chatStreamingRunId = "sse-stream", skip WS events in that case
-    if (this.chatStreamingRunId === "sse-stream") return;
-    this.syncRunTracking();
-    // Filter by session key (like TUI: only process events for active session)
-    // Gateway broadcasts the exact sessionKey the client sent in chat.send, so compare
-    // using the same format. Normalize both to full key to handle "main" vs "agent:main:main".
-    if (evt.sessionKey) {
-      const evtKey = this.normalizeSessionKey(evt.sessionKey);
-      const currentKey = this.normalizeSessionKey(this.chatConversationId || "main");
-      if (evtKey !== currentKey) return;
-    }
-    // Dedup: skip delta/final for already-finalized runs
-    if (this.finalizedRuns.has(evt.runId)) {
-      if (evt.state === "delta" || evt.state === "final") return;
-    }
-    this.noteSessionRun(evt.runId);
-    // Auto-assign chatRunId if we receive events without an active run (like TUI)
-    if (!this.chatRunId) {
-      this.chatRunId = evt.runId;
-    }
-
-    if (evt.state === "delta" && evt.message?.content) {
-      const text = evt.message.content
-        .filter((block) => block.type === "text" && block.text)
-        .map((block) => block.text)
-        .join("");
-
-      this.chatStreamingText = text;
-      this.chatStreamingRunId = evt.runId;
-    } else if (evt.state === "final") {
-      this.handleChatFinal(evt);
-    } else if (evt.state === "aborted") {
-      this.noteFinalizedRun(evt.runId);
-      this.chatRunId = null;
-      this.chatStreamingText = "";
-      this.chatStreamingRunId = null;
-      this.chatToolCalls = [];
-      this.chatSending = false;
-      // Reload history if not a local run (event from another client)
-      if (!this.localRunIds.has(evt.runId)) {
-        this.loadChatMessagesFromGateway();
-      }
-      this.flushChatQueue();
-    } else if (evt.state === "error") {
-      const errorMsg = evt.errorMessage || "Có lỗi xảy ra khi xử lý tin nhắn";
-      this.chatMessages = [
-        ...this.chatMessages,
-        { role: "assistant", content: `⚠️ ${errorMsg}`, timestamp: new Date() },
-      ];
-      this.noteFinalizedRun(evt.runId);
-      this.chatRunId = null;
-      this.chatStreamingText = "";
-      this.chatStreamingRunId = null;
-      this.chatToolCalls = [];
-      this.chatSending = false;
-      if (!this.localRunIds.has(evt.runId)) {
-        this.loadChatMessagesFromGateway();
-      }
-      this.flushChatQueue();
-    }
+    gwHandleChatStream(this, evt);
   }
 
-  /** Handle agent lifecycle events (start/end/error) like TUI. */
   private handleLifecycleEvent(evt: LifecycleEvent) {
-    // Only process for active run (like TUI)
-    if (evt.runId !== this.chatRunId) return;
-    const phase = evt.data?.phase;
-    if (phase === "start") {
-      // Agent started running — chatRunId is already set
-    } else if (phase === "end") {
-      // Agent finished — final chat event will handle cleanup
-    } else if (phase === "error") {
-      // Agent errored — final/error chat event will handle cleanup
-    }
+    gwHandleLifecycle(this, evt);
   }
-
-  /** Handle final chat event — append message, reset state, flush queue (like TUI). */
-  private handleChatFinal(evt: ChatStreamEvent) {
-    const finalText =
-      evt.message?.content
-        ?.filter((block) => block.type === "text" && block.text)
-        .map((block) => block.text)
-        .join("") || this.chatStreamingText;
-
-    // If not a local run, reload history to get server-side formatting
-    if (!this.localRunIds.has(evt.runId)) {
-      this.loadChatMessagesFromGateway();
-    } else if (finalText) {
-      this.chatMessages = [
-        ...this.chatMessages,
-        { role: "assistant", content: finalText, timestamp: new Date() },
-      ];
-    }
-
-    // Accumulate WS token usage
-    const wsUsage = evt.usage ?? evt.message?.usage;
-    if (wsUsage) {
-      this.chatSessionTokens +=
-        wsUsage.totalTokens || (wsUsage.input || 0) + (wsUsage.output || 0) || 0;
-    }
-
-    this.noteFinalizedRun(evt.runId);
-    this.chatRunId = null;
-    this.chatStreamingText = "";
-    this.chatStreamingRunId = null;
-    this.chatToolCalls = [];
-    this.chatSending = false;
-
-    // Cache to sessionStorage as backup.
-    this.cacheChatMessages();
-
-    // Refresh session selector (new sessions may have been created)
-    this.loadGatewaySessions();
-
-    // Flush queued messages (like original flushChatQueueForEvent)
-    this.flushChatQueue();
-
-    // Fetch updated token balance (fire-and-forget)
-    getTokenBalance()
-      .then((bal) => {
-        this.chatTokenBalance = bal.balance;
-        if (this.currentUser) {
-          this.currentUser = { ...this.currentUser, token_balance: bal.balance };
-        }
-      })
-      .catch(() => {});
-  }
-
-  // --- Chat message cache (localStorage — survives reload AND shared across tabs) ---
-  private static readonly CHAT_CACHE_KEY = "operis-chat-messages";
-
-  /** Save current messages to localStorage so they survive page reload and sync across tabs. */
-  private cacheChatMessages() {
-    try {
-      const sessionKey = this.chatConversationId || "main";
-      const data = {
-        sessionKey,
-        cachedAt: Date.now(),
-        messages: this.chatMessages.map((m) => ({
-          role: m.role,
-          content: m.content,
-          timestamp: m.timestamp?.toISOString(),
-        })),
-      };
-      localStorage.setItem(OperisApp.CHAT_CACHE_KEY, JSON.stringify(data));
-    } catch {
-      /* ignore quota errors */
-    }
-  }
-
-  /** Restore messages from localStorage cache (returns true if cache was used). */
-  private restoreCachedMessages(): boolean {
-    try {
-      const raw = localStorage.getItem(OperisApp.CHAT_CACHE_KEY);
-      if (!raw) return false;
-      const data = JSON.parse(raw);
-      const sessionKey = this.chatConversationId || "main";
-      if (data.sessionKey !== sessionKey) return false;
-      if (!Array.isArray(data.messages) || data.messages.length === 0) return false;
-      // Skip stale cache (older than 24h)
-      if (data.cachedAt && Date.now() - data.cachedAt > 24 * 60 * 60 * 1000) return false;
-      this.chatMessages = data.messages.map((m: Record<string, string>) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-        timestamp: m.timestamp ? new Date(m.timestamp) : undefined,
-      }));
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  // --- Chat queue (like original app-chat.ts) ---
-
-  /** Check if chat is busy (sending request OR waiting for run to finish). */
-  private isChatBusy() {
-    return this.chatSending || Boolean(this.chatRunId);
-  }
-
-  /** Add message to queue (sent when current run finishes). */
-  private enqueueChatMessage(text: string, images?: PendingImage[]) {
-    const trimmed = text.trim();
-    if (!trimmed && (!images || images.length === 0)) return;
-    this.chatQueue = [
-      ...this.chatQueue,
-      { id: crypto.randomUUID(), text: trimmed, createdAt: Date.now(), images },
-    ];
-  }
-
-  /** Flush first queued message — called after final/aborted events (like original). */
-  private async flushChatQueue() {
-    if (this.isChatBusy() || this.chatQueue.length === 0) return;
-    const [next, ...rest] = this.chatQueue;
-    this.chatQueue = rest;
-    // Re-use handleSendMessage logic but with queued content
-    this.chatDraft = next.text;
-    this.chatPendingImages = next.images ?? [];
-    await this.handleSendMessage();
-    // If send failed (chatSending still false), restore queue
-    if (!this.chatSending && !this.isChatBusy()) {
-      // Send didn't start — put it back
-      if (this.chatDraft === next.text) {
-        this.chatDraft = "";
-        this.chatQueue = [next, ...this.chatQueue];
-      }
-    }
-  }
-
-  /** Remove a queued message by id (like original removeQueuedMessage). */
-  private removeQueuedMessage(id: string) {
-    this.chatQueue = this.chatQueue.filter((item) => item.id !== id);
-  }
-
-  // --- Compaction event handler (like original app-tool-stream.ts) ---
 
   private handleCompactionEvent(evt: CompactionEvent) {
-    // Clear any existing auto-dismiss timer
-    if (this.compactionClearTimer) {
-      clearTimeout(this.compactionClearTimer);
-      this.compactionClearTimer = null;
-    }
-    if (evt.phase === "start") {
-      this.chatCompactionActive = true;
-    } else if (evt.phase === "end") {
-      this.chatCompactionActive = false;
-      // Auto-clear after 5s (like original COMPACTION_TOAST_DURATION_MS)
-      this.compactionClearTimer = setTimeout(() => {
-        this.chatCompactionActive = false;
-        this.compactionClearTimer = null;
-      }, 5000);
-    }
+    gwHandleCompaction(this, evt);
+  }
+
+  // --- Chat helpers — delegated to app-chat.ts ---
+
+  cacheChatMessages() {
+    chatCacheMsgs(this);
+  }
+
+  private restoreCachedMessages(): boolean {
+    return chatRestoreMsgs(this);
+  }
+
+  private removeQueuedMessage(id: string) {
+    chatRemoveQueuedMessage(this, id);
   }
 
   private static _lastRestoreMs = 0;
@@ -1178,6 +791,7 @@ export class OperisApp extends LitElement {
       this.loadChatMessagesFromGateway(true).then(() => this.scrollChatToBottom());
       // Load available sessions for the session selector dropdown
       this.loadGatewaySessions();
+      this.loadAvailableModels();
     } else if (tab === "workflow") {
       this.loadWorkflows();
     } else if (tab === "channels") {
@@ -1246,6 +860,10 @@ export class OperisApp extends LitElement {
       clearInterval(this.progressTimer);
       this.progressTimer = null;
     }
+    if (this.compactionClearTimer) {
+      clearTimeout(this.compactionClearTimer);
+      this.compactionClearTimer = null;
+    }
     super.disconnectedCallback();
   }
 
@@ -1309,7 +927,7 @@ export class OperisApp extends LitElement {
   }
 
   /** Load available sessions from gateway for session selector dropdown */
-  private async loadGatewaySessions() {
+  async loadGatewaySessions() {
     try {
       const gw = await waitForConnection(5000);
       const result = await gw.request<{
@@ -1337,14 +955,25 @@ export class OperisApp extends LitElement {
           const rest = this.shortSessionKey(s.key);
           return !rest.includes(":");
         });
+        // Sync current model from the active session
+        this.syncCurrentModelFromSessions();
       }
     } catch (err) {
       console.error("[chat] Failed to load gateway sessions:", err);
     }
   }
 
+  /** Set chatCurrentModel from the matching session in gatewaySessions. */
+  private syncCurrentModelFromSessions() {
+    const currentKey = this.normalizeSessionKey(this.chatConversationId || "main");
+    const match = this.gatewaySessions.find((s) => s.key === currentKey);
+    if (match?.model) {
+      this.chatCurrentModel = match.model;
+    }
+  }
+
   /** Normalize session key: "main" → "agent:main:main", passthrough if already full key */
-  private normalizeSessionKey(key: string): string {
+  normalizeSessionKey(key: string): string {
     if (key.startsWith("agent:")) return key;
     return `agent:main:${key}`;
   }
@@ -1358,11 +987,17 @@ export class OperisApp extends LitElement {
     return key.substring(secondColon + 1);
   }
 
+  // Guard against session switch race conditions
+  private sessionSwitchSeq = 0;
+
   /** Switch to a different gateway session */
   private async handleSessionChange(key: string) {
     const fullKey = this.normalizeSessionKey(key);
     const currentFull = this.normalizeSessionKey(this.chatConversationId || "main");
     if (fullKey === currentFull) return;
+
+    // Increment seq to invalidate any in-flight history loads
+    const seq = ++this.sessionSwitchSeq;
 
     // Store full key so chat.history receives the exact key from sessions.list
     this.chatConversationId = fullKey;
@@ -1370,8 +1005,13 @@ export class OperisApp extends LitElement {
     this.chatStreamingText = "";
     this.chatToolCalls = [];
     this.persistSessionKey(fullKey);
-    console.log("[session] switching to:", fullKey);
+
+    // Update model from cached session data (instant), then load history (which also re-syncs)
+    this.syncCurrentModelFromSessions();
     await this.loadChatMessagesFromGateway(true);
+
+    // Discard result if user switched again during load
+    if (this.sessionSwitchSeq !== seq) return;
     this.scrollChatToBottom();
   }
 
@@ -1405,11 +1045,23 @@ export class OperisApp extends LitElement {
     messagesEl.scrollTop = targetScrollTop;
   }
 
-  private async scrollChatToBottom() {
+  async scrollChatToBottom() {
     await this.updateComplete;
 
+    // Try chatsend view first (.chat-thread), then old view (.gc-messages)
+    const chatThread = this.renderRoot.querySelector(".chat-thread") as HTMLElement;
+    if (chatThread) {
+      chatThread.scrollTop = chatThread.scrollHeight;
+      return;
+    }
+
     const messagesEl = this.renderRoot.querySelector(".gc-messages") as HTMLElement;
-    if (!messagesEl) return;
+    if (!messagesEl) {
+      // Fallback: scroll main content area
+      const main = this.renderRoot.querySelector("main.content") as HTMLElement;
+      if (main) main.scrollTop = main.scrollHeight;
+      return;
+    }
 
     // Hide messages to prevent flash at top while positioning scroll
     messagesEl.style.visibility = "hidden";
@@ -1550,120 +1202,23 @@ export class OperisApp extends LitElement {
   }
 
   private async handleSendMessage() {
-    const hasDraft = this.chatDraft.trim() || this.chatPendingImages.length > 0;
-    if (!hasDraft) return;
-
-    // Queue if busy (like original — enqueueChatMessage when isChatBusy)
-    if (this.isChatBusy()) {
-      this.enqueueChatMessage(
-        this.chatDraft,
-        this.chatPendingImages.length > 0 ? [...this.chatPendingImages] : undefined,
-      );
-      this.chatDraft = "";
-      this.chatPendingImages = [];
-      return;
-    }
-
-    const userMessage = this.chatDraft.trim();
-    const images = this.chatPendingImages.length > 0 ? [...this.chatPendingImages] : undefined;
-    this.chatDraft = "";
-    this.chatPendingImages = [];
-    this.chatSending = true;
-    this.chatError = null;
-    this.chatStreamingText = "";
-    this.chatStreamingRunId = null;
-    this.chatToolCalls = [];
-
-    // Detect /new or /reset → clear messages before sending (gateway will create new transcript)
-    const isResetCommand = /^\/(new|reset)\b/i.test(userMessage);
-    if (isResetCommand) {
-      this.chatMessages = [];
-      this.chatSessionTokens = 0;
-      this.cacheChatMessages();
-    }
-
-    // Add user message (with image previews if any)
-    this.chatMessages = [
-      ...this.chatMessages,
-      {
-        role: "user",
-        content: userMessage,
-        timestamp: new Date(),
-        ...(images ? { images: images.map((img) => ({ preview: img.preview })) } : {}),
-      },
-    ];
-    this.cacheChatMessages();
-    await this.scrollChatToBottom();
-
-    try {
-      // Send via gateway WebSocket directly (bypasses operis-api chat/stream).
-      // Token deduction still works: gateway → operis provider → operis-api proxy.
-      // Streaming response arrives via WS "chat" events → handleChatStreamEvent().
-      const gw = await waitForConnection(5000);
-      const runId = crypto.randomUUID();
-      this.chatRunId = runId;
-      this.localRunIds.add(runId);
-      await gw.request(
-        "chat.send",
-        {
-          sessionKey: this.chatConversationId || "main",
-          message: userMessage,
-          deliver: false,
-          idempotencyKey: runId,
-          ...(this.chatThinkingLevel ? { thinking: this.chatThinkingLevel } : {}),
-          ...(images?.length
-            ? {
-                attachments: images.map((img) => ({
-                  type: "image",
-                  mimeType: img.mimeType,
-                  content: img.data,
-                })),
-              }
-            : {}),
-        },
-        30_000,
-      );
-      // chat.send returns immediately. Streaming via handleChatStreamEvent.
-    } catch (err) {
-      // Only clear chatSending on request failure — no WS events will arrive.
-      // On success, chatSending stays true until handleChatStreamEvent receives
-      // "final", "error", or "aborted" (which clear chatSending themselves).
-      const errorMsg = err instanceof Error ? err.message : "Không thể gửi tin nhắn";
-      this.chatError = errorMsg;
-      this.chatMessages = [
-        ...this.chatMessages,
-        { role: "assistant", content: `⚠️ ${errorMsg}`, timestamp: new Date() },
+    // Merge chat attachments into chatPendingImages before sending
+    if (this.chatAttachments.length > 0) {
+      this.chatPendingImages = [
+        ...this.chatPendingImages,
+        ...this.chatAttachments.map((a) => ({
+          data: a.dataUrl.replace(/^data:[^;]+;base64,/, ""),
+          mimeType: a.mimeType,
+          preview: a.dataUrl,
+        })),
       ];
-      this.chatRunId = null;
-      this.chatStreamingText = "";
-      this.chatStreamingRunId = null;
-      this.chatToolCalls = [];
-      this.chatSending = false;
+      this.chatAttachments = [];
     }
+    await chatSendMessage(this);
   }
 
   private handleStopChat() {
-    // Save partial response so user sees where it stopped
-    const partialText = this.chatStreamingText;
-    if (partialText) {
-      this.chatMessages = [
-        ...this.chatMessages,
-        { role: "assistant" as const, content: partialText, timestamp: new Date() },
-      ];
-    }
-    // Abort via gateway WS (with specific runId like OpenClaw TUI)
-    const gw = getGatewayClient();
-    if (gw.connected && this.chatRunId) {
-      gw.request("chat.abort", {
-        sessionKey: this.chatConversationId || "main",
-        runId: this.chatRunId,
-      }).catch(() => {});
-    }
-    this.chatRunId = null;
-    this.chatStreamingText = "";
-    this.chatStreamingRunId = null;
-    this.chatToolCalls = [];
-    this.chatSending = false;
+    chatStopChat(this);
   }
 
   // --- Chat sidebar handlers ---
@@ -1696,14 +1251,25 @@ export class OperisApp extends LitElement {
   private restoreSessionFromUrl() {
     const params = new URLSearchParams(window.location.search);
     const sessionParam = params.get("session")?.trim();
-    if (sessionParam) {
+    if (sessionParam && this.isChatSession(sessionParam)) {
       this.chatConversationId = sessionParam;
       this.persistSessionKey(sessionParam);
-    } else if (this.settings.lastSessionKey && this.settings.lastSessionKey !== "main") {
+    } else if (
+      this.settings.lastSessionKey &&
+      this.settings.lastSessionKey !== "main" &&
+      this.isChatSession(this.settings.lastSessionKey)
+    ) {
       this.chatConversationId = this.settings.lastSessionKey;
     }
     // Sync URL to include session param on chat tab
     this.syncSessionUrl();
+  }
+
+  /** Check if session key is a valid interactive chat session (not cron/telegram/discord/etc.) */
+  private isChatSession(key: string): boolean {
+    if (!key.startsWith("agent:")) return true; // short key like "main"
+    const rest = this.shortSessionKey(key);
+    return !rest.includes(":"); // exclude cron:*, telegram:*, discord:*, etc.
   }
 
   /** Save session key to localStorage and update URL. */
@@ -1736,73 +1302,42 @@ export class OperisApp extends LitElement {
    * Load chat messages from gateway WS `chat.history` — source of truth.
    * On initial load: show cache instantly as placeholder, then gateway replaces.
    */
-  private async loadChatMessagesFromGateway(isInitialLoad = false) {
-    // Show cache as placeholder while gateway loads (instant UI, no blank screen)
+  async loadChatMessagesFromGateway(isInitialLoad = false) {
     if (isInitialLoad) {
       this.restoreCachedMessages();
     }
+    const loadSeq = this.sessionSwitchSeq;
 
     try {
       const gw = await waitForConnection(5000);
       const sessionKey = this.chatConversationId || "main";
-      const res = await gw.request<{
-        messages?: Array<Record<string, unknown>>;
-        thinkingLevel?: string;
-        sessionId?: string;
-      }>("chat.history", { sessionKey, limit: 200 });
+      const result = await loadChatHistory(gw, sessionKey);
 
-      const rawMessages = Array.isArray(res.messages) ? res.messages : [];
-      console.log("[chat] history response:", {
-        sessionKey,
-        sessionId: res.sessionId,
-        messageCount: rawMessages.length,
-      });
-
-      // Parse gateway content blocks → flat string format used by client-web2
-      const parsed = rawMessages
-        .map((msg) => {
-          const role = (msg.role === "user" ? "user" : "assistant") as "user" | "assistant";
-          let content = "";
-          if (typeof msg.content === "string") {
-            content = msg.content;
-          } else if (Array.isArray(msg.content)) {
-            content = (msg.content as Array<Record<string, unknown>>)
-              .filter((block) => block.type === "text" && typeof block.text === "string")
-              .map((block) => block.text as string)
-              .join("\n");
-          }
-          const ts = typeof msg.timestamp === "number" ? new Date(msg.timestamp) : undefined;
-          return { role, content, timestamp: ts };
-        })
-        .filter((m) => m.content);
-
-      // Preserve scroll position on non-initial reloads (avoid jumping to top)
+      // Preserve scroll position on non-initial reloads
       const messagesEl = !isInitialLoad
         ? (this.renderRoot.querySelector(".gc-messages") as HTMLElement)
         : null;
       const prevScrollTop = messagesEl?.scrollTop ?? 0;
       const prevScrollHeight = messagesEl?.scrollHeight ?? 0;
 
-      // Gateway is source of truth — always replace local state
-      this.chatMessages = parsed;
-      // Store thinking level from session (used in chat.send)
-      if (typeof res.thinkingLevel === "string") {
-        this.chatThinkingLevel = res.thinkingLevel;
+      // Discard if user switched sessions during this load
+      if (this.sessionSwitchSeq !== loadSeq) return;
+
+      this.chatMessages = result.messages;
+      if (result.thinkingLevel !== null) {
+        this.chatThinkingLevel = result.thinkingLevel;
       }
       this.cacheChatMessages();
 
-      // Restore scroll position after re-render (non-initial reloads only)
       if (messagesEl) {
         await this.updateComplete;
         requestAnimationFrame(() => {
-          // If new messages were added, adjust scroll to keep same view
           const delta = messagesEl.scrollHeight - prevScrollHeight;
           messagesEl.scrollTop = prevScrollTop + delta;
         });
       }
     } catch (err) {
       console.warn("[chat] Failed to load messages from gateway:", err);
-      // If gateway failed and we have no messages, try cache as fallback
       if (this.chatMessages.length === 0) {
         this.restoreCachedMessages();
       }
@@ -1837,6 +1372,8 @@ export class OperisApp extends LitElement {
     this.chatSessionTokens = 0;
     this.chatError = null;
 
+    // Update model from cached session data (instant)
+    this.syncCurrentModelFromSessions();
     // Use gateway chat.history (source of truth) instead of REST API
     await this.loadChatMessagesFromGateway(true);
     this.scrollChatToBottom();
@@ -1874,259 +1411,41 @@ export class OperisApp extends LitElement {
     }
   }
 
-  // Workflow handlers
+  // Workflow handlers — delegate to app-workflow-actions
   private async loadWorkflows(silent = false) {
-    if (!silent) {
-      this.workflowLoading = true;
-      this.workflowError = null;
-    }
-    const startTime = Date.now();
-    try {
-      // Load both workflows and status in parallel
-      const [workflows, status] = await Promise.all([listWorkflows(), getWorkflowStatus()]);
-      // Auto-seed presets if no workflows exist (first run only)
-      if (workflows.length === 0) {
-        const seeded = await seedDefaultWorkflows();
-        this.workflows = seeded.length > 0 ? seeded : workflows;
-      } else {
-        this.workflows = workflows;
-      }
-      this.workflowStatus = status;
-
-      // Restore runningWorkflowIds from gateway state (survives page reload)
-      const loaded = this.workflows;
-      const running = new Set(this.runningWorkflowIds);
-      for (const w of loaded) {
-        if (typeof w.runningAtMs === "number") running.add(w.id);
-      }
-      this.runningWorkflowIds = running;
-    } catch (err) {
-      if (!silent) {
-        this.workflowError = err instanceof Error ? err.message : "Không thể tải workflows";
-      }
-    } finally {
-      if (!silent) {
-        // Ensure minimum 400ms loading time for visible feedback
-        const elapsed = Date.now() - startTime;
-        const minDelay = 400;
-        if (elapsed < minDelay) {
-          await new Promise((r) => setTimeout(r, minDelay - elapsed));
-        }
-      }
-      this.workflowLoading = false;
-    }
+    await workflow.loadWorkflows(this, silent);
   }
 
   private handleWorkflowFormChange(patch: Partial<WorkflowFormState>) {
-    this.workflowForm = { ...this.workflowForm, ...patch };
+    workflow.handleWorkflowFormChange(this, patch);
   }
 
-  private handleWorkflowEdit(workflow: Workflow) {
-    this.editingWorkflowId = workflow.id;
-    this.workflowForm = {
-      ...DEFAULT_WORKFLOW_FORM,
-      name: workflow.name,
-      description: workflow.description || "",
-      enabled: workflow.enabled,
-      agentId: workflow.agentId || "",
-      scheduleKind: workflow.schedule.kind,
-      everyAmount: workflow.schedule.everyAmount ?? 1,
-      everyUnit: workflow.schedule.everyUnit ?? "days",
-      atDatetime: workflow.schedule.atDatetime ?? "",
-      cronExpr: workflow.schedule.cronExpr ?? "0 9 * * *",
-      cronTz: workflow.schedule.cronTz ?? "",
-      sessionTarget: workflow.sessionTarget ?? "isolated",
-      wakeMode: workflow.wakeMode ?? "now",
-      payloadKind: workflow.payloadKind ?? "agentTurn",
-      timeout: workflow.timeout ?? 300,
-      prompt: workflow.prompt,
-    };
-    this.workflowShowForm = true;
+  private handleWorkflowEdit(wf: Workflow) {
+    workflow.handleWorkflowEdit(this, wf);
   }
 
   private async handleWorkflowSubmit() {
-    if (this.workflowSaving) return;
-    this.workflowSaving = true;
-    try {
-      if (this.editingWorkflowId) {
-        await updateWorkflow(this.editingWorkflowId, this.workflowForm);
-        showToast(`Đã cập nhật "${this.workflowForm.name}"`, "success");
-      } else {
-        await createWorkflow(this.workflowForm);
-        showToast(`Đã tạo workflow "${this.workflowForm.name}"`, "success");
-      }
-      this.workflowForm = { ...DEFAULT_WORKFLOW_FORM };
-      this.editingWorkflowId = null;
-      this.workflowShowForm = false;
-      this.loadWorkflows(true);
-    } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : this.editingWorkflowId
-            ? "Không thể cập nhật workflow"
-            : "Không thể tạo workflow";
-      showToast(msg, "error");
-      this.workflowError = msg;
-    } finally {
-      this.workflowSaving = false;
-    }
+    await workflow.handleWorkflowSubmit(this);
   }
 
-  private async handleWorkflowToggle(workflow: Workflow) {
-    const newState = !workflow.enabled;
-    // If disabling and job is running, cancel it on gateway first then wait for it to stop
-    if (!newState && this.runningWorkflowIds.has(workflow.id)) {
-      try {
-        const { cancelWorkflow } = await import("./workflow-api");
-        await cancelWorkflow(workflow.id);
-        // Wait for job to finish (gateway sends cron event when done) — max 30s
-        await new Promise<void>((resolve) => {
-          const maxWait = setTimeout(resolve, 30_000);
-          const check = setInterval(() => {
-            if (!this.runningWorkflowIds.has(workflow.id)) {
-              clearInterval(check);
-              clearTimeout(maxWait);
-              resolve();
-            }
-          }, 500);
-        });
-      } catch {
-        /* best effort */
-      }
-    }
-    // Optimistic update - update UI immediately
-    this.workflows = this.workflows.map((w) =>
-      w.id === workflow.id ? { ...w, enabled: newState } : w,
-    );
-    try {
-      await toggleWorkflow(workflow.id, newState);
-      showToast(
-        newState ? `Đã kích hoạt "${workflow.name}"` : `Đã tạm dừng "${workflow.name}"`,
-        "success",
-      );
-    } catch (err) {
-      // Revert on error
-      this.workflows = this.workflows.map((w) =>
-        w.id === workflow.id ? { ...w, enabled: !newState } : w,
-      );
-      const msg = err instanceof Error ? err.message : "Không thể thay đổi trạng thái";
-      showToast(msg, "error");
-      this.workflowError = msg;
-    }
+  private async handleWorkflowToggle(wf: Workflow) {
+    await workflow.handleWorkflowToggle(this, wf);
   }
 
-  private async handleWorkflowRun(workflow: Workflow) {
-    // Block if already running
-    if (this.runningWorkflowIds.has(workflow.id)) {
-      showToast(`"${workflow.name}" đang chạy, vui lòng đợi hoàn thành.`, "warning");
-      return;
-    }
-    // Mark as running immediately
-    this.runningWorkflowIds = new Set([...this.runningWorkflowIds, workflow.id]);
-    try {
-      await runWorkflow(workflow.id);
-      showToast(`Đang chạy "${workflow.name}"...`, "info");
-      // Cron events (started/finished) will update runningWorkflowIds via WS.
-      // Fallback: clear after 5min in case WS events are missed.
-      setTimeout(() => {
-        if (this.runningWorkflowIds.has(workflow.id)) {
-          const newSet = new Set(this.runningWorkflowIds);
-          newSet.delete(workflow.id);
-          this.runningWorkflowIds = newSet;
-        }
-      }, 300_000);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Không thể chạy workflow";
-      const isTimeout = msg.includes("timeout") || msg.includes("Timeout");
-      if (!isTimeout) {
-        // Only clear running state for non-timeout errors (e.g. gateway disconnected).
-        // Timeout means the job is likely still running — let WS "finished" event handle it.
-        this.runningWorkflowIds = new Set(
-          [...this.runningWorkflowIds].filter((id) => id !== workflow.id),
-        );
-        showToast(msg, "error");
-        this.workflowError = msg;
-      }
-    }
+  private async handleWorkflowRun(wf: Workflow) {
+    await workflow.handleWorkflowRun(this, wf);
   }
 
-  private async handleWorkflowCancel(workflow: Workflow) {
-    if (!this.runningWorkflowIds.has(workflow.id)) {
-      showToast(`"${workflow.name}" không đang chạy.`, "warning");
-      return;
-    }
-    try {
-      const { cancelWorkflow } = await import("./workflow-api");
-      await cancelWorkflow(workflow.id);
-      showToast(`Đã gửi lệnh hủy "${workflow.name}"`, "info");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Không thể hủy workflow";
-      showToast(msg, "error");
-    }
+  private async handleWorkflowCancel(wf: Workflow) {
+    await workflow.handleWorkflowCancel(this, wf);
   }
 
-  private async handleWorkflowDelete(workflow: Workflow) {
-    const confirmed = await showConfirm({
-      title: "Xóa workflow?",
-      message: `Bạn có chắc muốn xóa workflow "${workflow.name}"? Hành động này không thể hoàn tác.`,
-      confirmText: "Xóa",
-      cancelText: "Hủy",
-      variant: "danger",
-    });
-    if (!confirmed) return;
-    // If running, cancel on gateway first then wait for it to stop
-    if (this.runningWorkflowIds.has(workflow.id)) {
-      try {
-        const { cancelWorkflow } = await import("./workflow-api");
-        await cancelWorkflow(workflow.id);
-        await new Promise<void>((resolve) => {
-          const maxWait = setTimeout(resolve, 30_000);
-          const check = setInterval(() => {
-            if (!this.runningWorkflowIds.has(workflow.id)) {
-              clearInterval(check);
-              clearTimeout(maxWait);
-              resolve();
-            }
-          }, 500);
-        });
-      } catch {
-        /* best effort */
-      }
-    }
-    // Optimistic delete - remove from UI immediately
-    const originalWorkflows = this.workflows;
-    this.workflows = this.workflows.filter((w) => w.id !== workflow.id);
-    try {
-      await deleteWorkflow(workflow.id);
-      showToast(`Đã xóa "${workflow.name}"`, "success");
-    } catch (err) {
-      // Revert on error
-      this.workflows = originalWorkflows;
-      const msg = err instanceof Error ? err.message : "Không thể xóa workflow";
-      showToast(msg, "error");
-      this.workflowError = msg;
-    }
+  private async handleWorkflowDelete(wf: Workflow) {
+    await workflow.handleWorkflowDelete(this, wf);
   }
 
   private async loadWorkflowRuns(workflowId: string | null) {
-    // Toggle off - clear runs
-    if (!workflowId) {
-      this.workflowRunsId = null;
-      this.workflowRuns = [];
-      return;
-    }
-    this.workflowRunsId = workflowId;
-    this.workflowRunsLoading = true;
-    try {
-      const runs = await getWorkflowRuns(workflowId);
-      this.workflowRuns = runs;
-    } catch (err) {
-      console.error("Failed to load workflow runs:", err);
-      this.workflowRuns = [];
-    } finally {
-      this.workflowRunsLoading = false;
-    }
+    await workflow.loadWorkflowRuns(this, workflowId);
   }
 
   // Billing handlers
@@ -2142,47 +1461,9 @@ export class OperisApp extends LitElement {
     }
   }
 
-  // Billing - Load data from API
+  // Billing handlers — delegate to app-billing-actions
   private async loadBillingData() {
-    // Load pricing tiers
-    this.billingPricingLoading = true;
-    try {
-      const pricingResponse = await getPricing();
-      this.billingPricingTiers = pricingResponse.tiers;
-      // Select popular tier by default
-      const popularIndex = pricingResponse.tiers.findIndex((t) => t.popular);
-      if (popularIndex >= 0) this.billingSelectedPackage = popularIndex;
-    } catch (err) {
-      console.error("Failed to load pricing:", err);
-    } finally {
-      this.billingPricingLoading = false;
-    }
-
-    // Load token balance (includes free reset countdown)
-    try {
-      const bal = await getTokenBalance();
-      this.billingFreeResetAt = bal.next_free_reset_at;
-      // Sync balances from dedicated endpoint
-      if (this.currentUser) {
-        this.currentUser = {
-          ...this.currentUser,
-          token_balance: bal.paid,
-          free_token_balance: bal.free,
-        };
-      }
-    } catch {
-      /* keep existing values */
-    }
-
-    // Load pending order
-    try {
-      this.billingPendingOrder = await getPendingDeposit();
-    } catch {
-      this.billingPendingOrder = null;
-    }
-
-    // Load deposit history
-    this.loadBillingHistory();
+    await billing.loadBillingData(this);
   }
 
   private async loadLogs() {
@@ -2226,218 +1507,73 @@ export class OperisApp extends LitElement {
   }
 
   private async loadBillingHistory() {
-    this.billingHistoryLoading = true;
-    this.billingHistoryPage = 1;
-    try {
-      const historyResponse = await getDepositHistory(1000, 0);
-      this.billingDepositHistory = historyResponse.deposits;
-    } catch (err) {
-      console.error("Failed to load deposit history:", err);
-    } finally {
-      this.billingHistoryLoading = false;
-    }
+    await billing.loadBillingHistory(this);
   }
 
   private handleBillingHistoryPageChange(page: number) {
-    this.billingHistoryPage = page;
+    billing.handleBillingHistoryPageChange(this, page);
   }
 
   private async handleBillingBuyTokens() {
-    this.billingBuyLoading = true;
-    try {
-      let order;
-      if (this.billingPaymentMode === "amount") {
-        const amount = Number(this.billingCustomAmount);
-        if (!amount || amount <= 0) return;
-        order = await createDeposit({ amount });
-      } else {
-        const tier = this.billingPricingTiers[this.billingSelectedPackage];
-        if (!tier) return;
-        order = await createDeposit({ tierId: tier.id });
-      }
-      this.billingPendingOrder = order;
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Không thể tạo đơn nạp", "error");
-    } finally {
-      this.billingBuyLoading = false;
-    }
+    await billing.handleBillingBuyTokens(this);
   }
 
   private handleBillingCloseQrModal() {
-    this.billingShowQrModal = false;
+    billing.handleBillingCloseQrModal(this);
   }
 
   private async handleBillingCheckTransaction() {
-    if (!this.billingPendingOrder) return;
-
-    this.billingCheckingTransaction = true;
-    try {
-      const order = await getDeposit(this.billingPendingOrder.id);
-      this.billingPendingOrder = order;
-
-      if (order.status === "completed") {
-        showToast("Giao dịch thành công! Token đã được cộng vào tài khoản.", "success");
-        this.billingPendingOrder = null;
-        // Refresh user to get updated balance
-        const user = await restoreSession();
-        if (user) this.currentUser = user;
-        // Refresh history
-        this.loadBillingHistory();
-      } else if (order.status === "cancelled" || order.status === "expired") {
-        showToast("Đơn nạp đã bị hủy hoặc hết hạn.", "error");
-        this.billingPendingOrder = null;
-        this.loadBillingHistory();
-      }
-    } catch (err) {
-      console.error("Failed to check transaction:", err);
-    } finally {
-      this.billingCheckingTransaction = false;
-    }
+    await billing.handleBillingCheckTransaction(this);
   }
 
   private async handleBillingCancelPending() {
-    if (!this.billingPendingOrder) return;
-
-    const confirmed = await showConfirm({
-      title: "Hủy đơn nạp?",
-      message: "Bạn có chắc muốn hủy đơn nạp này?",
-      confirmText: "Hủy đơn",
-      cancelText: "Không",
-      variant: "danger",
-    });
-
-    if (confirmed) {
-      try {
-        await cancelDeposit(this.billingPendingOrder.id);
-        this.billingPendingOrder = null;
-        this.billingShowQrModal = false;
-        this.loadBillingHistory();
-      } catch (err) {
-        showToast(err instanceof Error ? err.message : "Không thể hủy đơn", "error");
-      }
-    }
+    await billing.handleBillingCancelPending(this);
   }
 
   private handleBillingRefreshHistory() {
-    this.loadBillingHistory();
+    billing.handleBillingRefreshHistory(this);
   }
 
   private async handleViewDepositDetail(deposit: import("./deposits-api").DepositOrder) {
-    // Open modal and fetch full details from API
-    this.billingSelectedDeposit = deposit;
-    this.billingShowDetailModal = true;
-    this.billingDetailLoading = true;
-
-    try {
-      const fullDeposit = await getDeposit(deposit.id);
-      this.billingSelectedDeposit = fullDeposit;
-    } catch (err) {
-      console.error("Failed to fetch deposit details:", err);
-    } finally {
-      this.billingDetailLoading = false;
-    }
+    await billing.handleViewDepositDetail(this, deposit);
   }
 
   private handleCloseDetailModal() {
-    this.billingShowDetailModal = false;
-    this.billingSelectedDeposit = null;
+    billing.handleCloseDetailModal(this);
   }
 
   private handleBillingCreateKey() {
-    if (!this.billingNewKeyName.trim()) return;
-    const newKey = {
-      id: Date.now().toString(),
-      name: this.billingNewKeyName.trim(),
-      key: `sk-...${Math.random().toString(36).substring(2, 8)}`,
-      createdAt: Date.now(),
-    };
-    this.billingApiKeys = [...this.billingApiKeys, newKey];
-    this.billingNewKeyName = "";
-    this.billingShowCreateKeyModal = false;
-    showToast("Đã tạo API key", "success");
+    billing.handleBillingCreateKey(this);
   }
 
   private handleBillingCopyKey(key: string) {
-    navigator.clipboard.writeText(key);
-    showToast("Đã sao chép key!", "success");
+    billing.handleBillingCopyKey(this, key);
   }
 
   private async handleBillingDeleteKey(id: string) {
-    const confirmed = await showConfirm({
-      title: "Xóa API key?",
-      message: "Bạn có chắc muốn xóa API key này? Hành động này không thể hoàn tác.",
-      confirmText: "Xóa",
-      cancelText: "Hủy",
-      variant: "danger",
-    });
-    if (confirmed) {
-      this.billingApiKeys = this.billingApiKeys.filter((k) => k.id !== id);
-      showToast("Đã xóa API key", "success");
-    }
+    await billing.handleBillingDeleteKey(this, id);
   }
 
-  // Channels handlers
+  // Channels handlers — delegate to app-channel-actions
   private async loadChannels() {
-    this.channelsLoading = true;
-    this.channelsError = null;
-    try {
-      this.channels = await getChannelsStatus();
-    } catch (err) {
-      this.channelsError = err instanceof Error ? err.message : "Không thể tải kênh";
-      // Fallback to default channels
-      this.channels = Object.entries(CHANNEL_DEFINITIONS).map(([id, def]) => ({
-        id: id as ChannelId,
-        name: def.name,
-        icon: def.icon,
-        connected: false,
-      }));
-    } finally {
-      this.channelsLoading = false;
-    }
+    await channel.loadChannels(this);
   }
 
   private async handleChannelConnect(channelId: ChannelId) {
-    this.channelsConnecting = channelId;
-    this.channelsError = null;
-    try {
-      if (channelId === "zalo") {
-        // Zalo: QR login via gateway WS
-        this.zaloQrStatus = "pending";
-        this.zaloQrBase64 = null;
-        const startResult = await startZaloQrLogin({ force: true });
-        console.log("[channels] zalo QR start:", startResult.message);
-        if (startResult.qrDataUrl) {
-          this.zaloQrBase64 = startResult.qrDataUrl;
-          this.zaloQrStatus = "qr_ready";
-        }
-        // Wait for login completion in background
-        this.startZaloLoginWait();
-        return; // Don't clear channelsConnecting — QR modal stays open
+    // Telegram: open token modal if not yet connected
+    if (channelId === "telegram") {
+      const tgStatus = this.channels.find((c) => c.id === "telegram");
+      if (!tgStatus?.connected) {
+        this.telegramTokenModal = true;
+        this.telegramTokenValue = "";
+        this.telegramTokenError = null;
+        return;
       }
-
-      if (channelId === "telegram") {
-        // Check if telegram is already configured (has bot token)
-        const configured = await isChannelConfigured("telegram");
-        if (!configured) {
-          // Show bot token input modal
-          this.telegramTokenModal = true;
-          this.telegramTokenValue = "";
-          this.telegramTokenError = null;
-          this.telegramTokenSaving = false;
-          this.channelsConnecting = null;
-          return;
-        }
-      }
-
-      await this.loadChannels();
-      showToast("Đã kết nối kênh", "success");
-    } catch (err) {
-      console.error("[channels] connect error:", err);
-      this.channelsError = err instanceof Error ? err.message : "Không thể kết nối kênh";
-      showToast(err instanceof Error ? err.message : "Không thể kết nối kênh", "error");
-      this.zaloQrStatus = null;
-      this.zaloQrBase64 = null;
-      this.channelsConnecting = null;
+    }
+    await channel.handleChannelConnect(this, channelId);
+    // If Zalo QR flow started, kick off background wait
+    if (channelId === "zalo" && this.zaloQrStatus !== null) {
+      this.startZaloLoginWait();
     }
   }
 
@@ -2468,928 +1604,245 @@ export class OperisApp extends LitElement {
   }
 
   private async startZaloLoginWait() {
-    try {
-      const result = await waitZaloQrLogin({ timeoutMs: 120_000 });
-      if (result.connected) {
-        this.stopZaloPolling();
-        this.channelsConnecting = null;
-        showToast("Đã kết nối Zalo", "success");
-        await this.loadChannels();
-      } else {
-        this.stopZaloPolling();
-        this.channelsConnecting = null;
-        this.channelsError = result.message || "Kết nối Zalo thất bại";
-      }
-    } catch {
-      this.stopZaloPolling();
-      this.channelsConnecting = null;
-      this.channelsError = "Mất kết nối khi chờ quét mã QR";
-    }
+    await channel.startZaloLoginWait(this);
   }
 
   private stopZaloPolling() {
-    this.zaloQrBase64 = null;
-    this.zaloQrStatus = null;
+    channel.stopZaloPolling(this);
   }
 
   private async handleChannelDisconnect(channelId: ChannelId) {
-    this.channelsConnecting = channelId;
-    this.channelsError = null;
-    try {
-      await disconnectChannel(channelId);
-      await this.loadChannels();
-      showToast("Đã ngắt kết nối kênh", "success");
-    } catch (err) {
-      this.channelsError = err instanceof Error ? err.message : "Không thể ngắt kết nối kênh";
-      showToast(err instanceof Error ? err.message : "Không thể ngắt kết nối kênh", "error");
-    } finally {
-      this.channelsConnecting = null;
-    }
+    await channel.handleChannelDisconnect(this, channelId);
   }
 
-  // Settings handlers
+  // Settings handlers — delegate to app-settings-actions
   private async loadUserProfile() {
-    this.settingsLoading = true;
-    this.settingsError = null;
-    try {
-      this.userProfile = await getUserProfile();
-      this.settingsNameValue = this.userProfile.name;
-    } catch (err) {
-      this.settingsError = err instanceof Error ? err.message : "Không thể tải hồ sơ";
-    } finally {
-      this.settingsLoading = false;
-    }
+    await settings.loadUserProfile(this);
   }
 
   private handleEditName() {
-    this.settingsEditingName = true;
-    this.settingsNameValue = this.userProfile?.name || "";
+    settings.handleEditName(this);
   }
 
   private handleCancelEditName() {
-    this.settingsEditingName = false;
-    this.settingsNameValue = this.userProfile?.name || "";
+    settings.handleCancelEditName(this);
   }
 
   private async handleSaveName() {
-    if (!this.settingsNameValue.trim()) return;
-    this.settingsSaving = true;
-    this.settingsError = null;
-    this.settingsSuccess = null;
-    try {
-      this.userProfile = await updateUserProfile({
-        name: this.settingsNameValue.trim(),
-      });
-      this.settingsEditingName = false;
-      this.settingsSuccess = "Đã cập nhật thành công";
-      setTimeout(() => (this.settingsSuccess = null), 3000);
-      showToast("Đã cập nhật tên", "success");
-    } catch (err) {
-      this.settingsError = err instanceof Error ? err.message : "Không thể cập nhật hồ sơ";
-      showToast(err instanceof Error ? err.message : "Không thể cập nhật hồ sơ", "error");
-    } finally {
-      this.settingsSaving = false;
-    }
+    await settings.handleSaveName(this);
   }
 
   private async handleChangePassword(currentPassword: string, newPassword: string) {
-    this.settingsSaving = true;
-    this.settingsError = null;
-    this.settingsSuccess = null;
-    try {
-      await changePassword(currentPassword, newPassword);
-      this.settingsShowPasswordForm = false;
-      this.settingsSuccess = "Đổi mật khẩu thành công";
-      setTimeout(() => (this.settingsSuccess = null), 3000);
-      showToast("Đổi mật khẩu thành công", "success");
-    } catch (err) {
-      this.settingsError = err instanceof Error ? err.message : "Không thể đổi mật khẩu";
-      showToast(err instanceof Error ? err.message : "Không thể đổi mật khẩu", "error");
-    } finally {
-      this.settingsSaving = false;
-    }
+    await settings.handleChangePassword(this, currentPassword, newPassword);
   }
 
   // API key handlers
   private async loadApiKeyStatus() {
-    this.settingsApiKeyLoading = true;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<{ config: Record<string, unknown>; hash: string }>(
-        "config.get",
-        {},
-      );
-      if (res?.config) {
-        const providers = (res.config as any)?.models?.providers?.operis;
-        this.settingsApiKeyHasKey = !!(providers?.apiKey && providers.apiKey !== "••••••••");
-      }
-    } catch {
-      // ignore — config may not be available
-    } finally {
-      this.settingsApiKeyLoading = false;
-    }
+    await settings.loadApiKeyStatus(this);
   }
 
   private async handleSaveApiKey() {
-    const key = this.settingsApiKey.trim();
-    if (!key) return;
-    this.settingsApiKeySaving = true;
-    this.settingsError = null;
-    try {
-      const client = await waitForConnection();
-      // Get current config hash for optimistic concurrency
-      const snapshot = await client.request<{ config: Record<string, unknown>; hash: string }>(
-        "config.get",
-        {},
-      );
-      const baseHash = snapshot?.hash ?? "";
-      // Patch only the apiKey field
-      await client.request("config.patch", {
-        baseHash,
-        raw: JSON.stringify({ models: { providers: { operis: { apiKey: key } } } }),
-      });
-      this.settingsApiKey = "";
-      this.settingsApiKeyHasKey = true;
-      this.settingsSuccess = "API key đã được lưu";
-      setTimeout(() => (this.settingsSuccess = null), 3000);
-      showToast("API key đã được lưu", "success");
-    } catch (err) {
-      this.settingsError = err instanceof Error ? err.message : "Không thể lưu API key";
-      showToast(err instanceof Error ? err.message : "Không thể lưu API key", "error");
-    } finally {
-      this.settingsApiKeySaving = false;
-    }
+    await settings.handleSaveApiKey(this);
   }
 
-  // Agents handlers
+  // Agents handlers — delegate to app-agents-actions
   private async loadAgents() {
-    this.agentsLoading = true;
-    this.agentsError = null;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<AgentsListResult>("agents.list", {});
-      if (res) {
-        this.agentsList = res;
-        const known = res.agents.some((a) => a.id === this.agentSelectedId);
-        if (!this.agentSelectedId || !known) {
-          this.agentSelectedId = res.defaultId ?? res.agents[0]?.id ?? null;
-        }
-        // Auto-load config + identity for overview panel
-        if (this.agentSelectedId) {
-          this.loadAgentConfig();
-          this.loadAgentIdentity(this.agentSelectedId);
-        }
-      }
-    } catch (err) {
-      this.agentsError = err instanceof Error ? err.message : "Không thể tải nhân viên";
-    } finally {
-      this.agentsLoading = false;
-    }
+    await agents.loadAgents(this);
   }
 
   private handleSelectAgent(agentId: string) {
-    if (this.agentSelectedId === agentId) return;
-    this.agentSelectedId = agentId;
-    this.agentActivePanel = "overview";
-    // Reset agent-specific state
-    this.agentFilesList = null;
-    this.agentFilesError = null;
-    this.agentFileActive = null;
-    this.agentFileContents = {};
-    this.agentFileDrafts = {};
-    this.agentChannelsSnapshot = null;
-    this.agentChannelsLastSuccess = null;
-    this.agentCronStatus = null;
-    this.agentCronJobs = [];
-    this.agentSkillsReport = null;
-    this.agentSkillsError = null;
-    this.agentSkillsAgentId = null;
-    this.agentSkillsFilter = "";
-    // Auto-load config + identity
-    this.loadAgentConfig();
-    this.loadAgentIdentity(agentId);
+    agents.handleSelectAgent(this, agentId);
   }
 
   private handleSelectPanel(
     panel: "overview" | "files" | "tools" | "skills" | "channels" | "cron",
   ) {
-    this.agentActivePanel = panel;
-    const agentId = this.agentSelectedId;
-    if (!agentId) return;
-    if (panel === "files" && this.agentFilesList?.agentId !== agentId) {
-      this.loadAgentFiles(agentId);
-    }
-    if (panel === "channels" && !this.agentChannelsSnapshot) {
-      this.loadAgentChannels();
-    }
-    if (panel === "cron" && !this.agentCronStatus) {
-      this.loadAgentCron();
-    }
-    if (panel === "skills" && this.agentSkillsAgentId !== agentId) {
-      this.loadAgentSkills(agentId);
-    }
-    if (panel === "overview" || panel === "tools") {
-      if (!this.agentConfigForm) {
-        this.loadAgentConfig();
-      }
-    }
+    agents.handleSelectPanel(this, panel);
   }
 
   private async loadAgentFiles(agentId: string) {
-    this.agentFilesLoading = true;
-    this.agentFilesError = null;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<AgentsFilesListResult>("agents.files.list", { agentId });
-      if (res) {
-        this.agentFilesList = res;
-        if (this.agentFileActive && !res.files.some((f) => f.name === this.agentFileActive)) {
-          this.agentFileActive = null;
-        }
-      }
-    } catch (err) {
-      this.agentFilesError = err instanceof Error ? err.message : "Không thể tải files";
-    } finally {
-      this.agentFilesLoading = false;
-    }
+    await agents.loadAgentFiles(this, agentId);
   }
 
   private async handleSelectFile(name: string) {
-    this.agentFileActive = name;
-    if (!this.agentSelectedId || this.agentFileContents[name] !== undefined) return;
-    // Load file content from gateway
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<{ file?: AgentFileEntry }>("agents.files.get", {
-        agentId: this.agentSelectedId,
-        name,
-      });
-      if (res?.file) {
-        const content = res.file.content ?? "";
-        this.agentFileContents = { ...this.agentFileContents, [name]: content };
-        this.agentFileDrafts = { ...this.agentFileDrafts, [name]: content };
-      }
-    } catch (err) {
-      console.error("Failed to load file content:", err);
-    }
+    await agents.handleSelectFile(this, name);
   }
 
   private handleFileDraftChange(name: string, content: string) {
-    this.agentFileDrafts = { ...this.agentFileDrafts, [name]: content };
+    agents.handleFileDraftChange(this, name, content);
   }
 
   private handleFileReset(name: string) {
-    const base = this.agentFileContents[name] ?? "";
-    this.agentFileDrafts = { ...this.agentFileDrafts, [name]: base };
+    agents.handleFileReset(this, name);
   }
 
   private async handleFileSave(name: string) {
-    if (!this.agentSelectedId) return;
-    this.agentFileSaving = true;
-    try {
-      const client = await waitForConnection();
-      const content = this.agentFileDrafts[name] ?? "";
-      const res = await client.request<{ file?: AgentFileEntry }>("agents.files.set", {
-        agentId: this.agentSelectedId,
-        name,
-        content,
-      });
-      if (res?.file) {
-        this.agentFileContents = { ...this.agentFileContents, [name]: content };
-        this.agentFileDrafts = { ...this.agentFileDrafts, [name]: content };
-      }
-      showToast("Đã lưu file", "success");
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Không thể lưu file", "error");
-    } finally {
-      this.agentFileSaving = false;
-    }
+    await agents.handleFileSave(this, name);
   }
 
   private async loadAgentConfig() {
-    if (!this.agentSelectedId) return;
-    this.agentConfigLoading = true;
-    try {
-      const client = await waitForConnection();
-      // config.get returns ConfigSnapshot { path, exists, raw, config, issues }
-      // The actual config data is inside .config
-      const res = await client.request<{ config?: Record<string, unknown> }>("config.get", {});
-      this.agentConfigForm = (res?.config as Record<string, unknown>) ?? {};
-      this.agentConfigDirty = false;
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Không thể tải config", "error");
-    } finally {
-      this.agentConfigLoading = false;
-    }
+    await agents.loadAgentConfig(this);
   }
 
   private async saveAgentConfig() {
-    if (!this.agentSelectedId) return;
-    this.agentConfigSaving = true;
-    try {
-      const client = await waitForConnection();
-      const raw = JSON.stringify(this.agentConfigForm ?? {});
-      await client.request("config.set", { raw });
-      showToast("Đã lưu config", "success");
-      this.agentConfigDirty = false;
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Không thể lưu config", "error");
-    } finally {
-      this.agentConfigSaving = false;
-    }
+    await agents.saveAgentConfig(this);
   }
 
-  private handleAgentModelChange(_agentId: string, modelId: string | null) {
-    this.agentConfigForm = { ...this.agentConfigForm, primaryModel: modelId };
-    this.agentConfigDirty = true;
+  private handleAgentModelChange(agentId: string, modelId: string | null) {
+    agents.handleAgentModelChange(this, agentId, modelId);
   }
 
-  private handleAgentModelFallbacksChange(_agentId: string, fallbacks: string[]) {
-    this.agentConfigForm = { ...this.agentConfigForm, modelFallbacks: fallbacks };
-    this.agentConfigDirty = true;
+  private handleAgentModelFallbacksChange(agentId: string, fallbacks: string[]) {
+    agents.handleAgentModelFallbacksChange(this, agentId, fallbacks);
   }
 
   private async loadAgentChannels() {
-    this.agentChannelsLoading = true;
-    this.agentChannelsError = null;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<ChannelsStatusSnapshot>("channels.status", {
-        probe: true,
-        timeoutMs: 8000,
-      });
-      this.agentChannelsSnapshot = res ?? {};
-      this.agentChannelsLastSuccess = Date.now();
-    } catch (err) {
-      this.agentChannelsError = err instanceof Error ? err.message : "Không thể tải channels";
-    } finally {
-      this.agentChannelsLoading = false;
-    }
+    await agents.loadAgentChannels(this);
   }
 
   private async loadAgentIdentity(agentId: string) {
-    this.agentIdentityLoading = true;
-    this.agentIdentityError = null;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<AgentIdentityResult>("agent.identity.get", { agentId });
-      if (res) {
-        this.agentIdentityById = { ...this.agentIdentityById, [agentId]: res };
-      }
-    } catch (err) {
-      this.agentIdentityError = err instanceof Error ? err.message : "Không thể tải identity";
-    } finally {
-      this.agentIdentityLoading = false;
-    }
+    await agents.loadAgentIdentity(this, agentId);
   }
 
   private async loadAgentSkills(agentId: string) {
-    if (this.agentSkillsLoading) return;
-    this.agentSkillsLoading = true;
-    this.agentSkillsError = null;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<SkillStatusReport>("skills.status", { agentId });
-      if (res) {
-        this.agentSkillsReport = res;
-        this.agentSkillsAgentId = agentId;
-      }
-    } catch (err) {
-      this.agentSkillsError = err instanceof Error ? err.message : "Không thể tải kĩ năng";
-    } finally {
-      this.agentSkillsLoading = false;
-    }
+    await agents.loadAgentSkills(this, agentId);
   }
 
   private handleToolsProfileChange(agentId: string, profile: string | null, clearAllow: boolean) {
-    if (!this.agentConfigForm) return;
-    const config = { ...this.agentConfigForm };
-    const agents = (config.agents ?? {}) as Record<string, unknown>;
-    const list = Array.isArray(agents.list) ? [...agents.list] : [];
-    const index = list.findIndex(
-      (e) => e && typeof e === "object" && "id" in e && (e as { id?: string }).id === agentId,
-    );
-    if (index < 0) return;
-    const entry = { ...(list[index] as Record<string, unknown>) };
-    const tools = { ...((entry.tools as Record<string, unknown>) ?? {}) };
-    if (profile) {
-      tools.profile = profile;
-    } else {
-      delete tools.profile;
-    }
-    if (clearAllow) {
-      delete tools.allow;
-    }
-    entry.tools = tools;
-    list[index] = entry;
-    config.agents = { ...agents, list };
-    this.agentConfigForm = config;
-    this.agentConfigDirty = true;
+    agents.handleToolsProfileChange(this, agentId, profile, clearAllow);
   }
 
   private handleToolsOverridesChange(agentId: string, alsoAllow: string[], deny: string[]) {
-    if (!this.agentConfigForm) return;
-    const config = { ...this.agentConfigForm };
-    const agents = (config.agents ?? {}) as Record<string, unknown>;
-    const list = Array.isArray(agents.list) ? [...agents.list] : [];
-    const index = list.findIndex(
-      (e) => e && typeof e === "object" && "id" in e && (e as { id?: string }).id === agentId,
-    );
-    if (index < 0) return;
-    const entry = { ...(list[index] as Record<string, unknown>) };
-    const tools = { ...((entry.tools as Record<string, unknown>) ?? {}) };
-    if (alsoAllow.length > 0) {
-      tools.alsoAllow = alsoAllow;
-    } else {
-      delete tools.alsoAllow;
-    }
-    if (deny.length > 0) {
-      tools.deny = deny;
-    } else {
-      delete tools.deny;
-    }
-    entry.tools = tools;
-    list[index] = entry;
-    config.agents = { ...agents, list };
-    this.agentConfigForm = config;
-    this.agentConfigDirty = true;
+    agents.handleToolsOverridesChange(this, agentId, alsoAllow, deny);
   }
 
   private handleAgentSkillToggle(agentId: string, skillName: string, enabled: boolean) {
-    if (!this.agentConfigForm) return;
-    const config = { ...this.agentConfigForm };
-    const agents = (config.agents ?? {}) as Record<string, unknown>;
-    const list = Array.isArray(agents.list) ? [...agents.list] : [];
-    const index = list.findIndex(
-      (e) => e && typeof e === "object" && "id" in e && (e as { id?: string }).id === agentId,
-    );
-    if (index < 0) return;
-    const entry = { ...(list[index] as Record<string, unknown>) };
-    const normalizedSkill = skillName.trim();
-    if (!normalizedSkill) return;
-    const allSkills = this.agentSkillsReport?.skills?.map((s) => s.name).filter(Boolean) ?? [];
-    const existing = Array.isArray(entry.skills)
-      ? (entry.skills as string[]).map((n) => String(n).trim()).filter(Boolean)
-      : undefined;
-    const base = existing ?? allSkills;
-    const next = new Set(base);
-    if (enabled) {
-      next.add(normalizedSkill);
-    } else {
-      next.delete(normalizedSkill);
-    }
-    entry.skills = [...next];
-    list[index] = entry;
-    config.agents = { ...agents, list };
-    this.agentConfigForm = config;
-    this.agentConfigDirty = true;
+    agents.handleAgentSkillToggle(this, agentId, skillName, enabled);
   }
 
   private handleAgentSkillsClear(agentId: string) {
-    if (!this.agentConfigForm) return;
-    const config = { ...this.agentConfigForm };
-    const agents = (config.agents ?? {}) as Record<string, unknown>;
-    const list = Array.isArray(agents.list) ? [...agents.list] : [];
-    const index = list.findIndex(
-      (e) => e && typeof e === "object" && "id" in e && (e as { id?: string }).id === agentId,
-    );
-    if (index < 0) return;
-    const entry = { ...(list[index] as Record<string, unknown>) };
-    delete entry.skills;
-    list[index] = entry;
-    config.agents = { ...agents, list };
-    this.agentConfigForm = config;
-    this.agentConfigDirty = true;
+    agents.handleAgentSkillsClear(this, agentId);
   }
 
   private handleAgentSkillsDisableAll(agentId: string) {
-    if (!this.agentConfigForm) return;
-    const config = { ...this.agentConfigForm };
-    const agents = (config.agents ?? {}) as Record<string, unknown>;
-    const list = Array.isArray(agents.list) ? [...agents.list] : [];
-    const index = list.findIndex(
-      (e) => e && typeof e === "object" && "id" in e && (e as { id?: string }).id === agentId,
-    );
-    if (index < 0) return;
-    const entry = { ...(list[index] as Record<string, unknown>) };
-    entry.skills = [];
-    list[index] = entry;
-    config.agents = { ...agents, list };
-    this.agentConfigForm = config;
-    this.agentConfigDirty = true;
+    agents.handleAgentSkillsDisableAll(this, agentId);
+  }
+
+  private async handleAddBinding(agentId: string, channelId: string, accountId?: string) {
+    await agents.handleAddBinding(this, agentId, channelId, accountId);
+  }
+
+  private handleRemoveBinding(bindingIndex: number) {
+    agents.handleRemoveBinding(this, bindingIndex);
   }
 
   private async loadAgentCron() {
-    this.agentCronLoading = true;
-    this.agentCronError = null;
-    try {
-      const client = await waitForConnection();
-      // Two separate calls matching original UI: cron.status + cron.list
-      const [statusRes, listRes] = await Promise.all([
-        client.request<CronStatus>("cron.status", {}),
-        client.request<{ jobs?: CronJob[] }>("cron.list", { includeDisabled: true }),
-      ]);
-      this.agentCronStatus = statusRes ?? { enabled: false, jobs: 0 };
-      this.agentCronJobs = Array.isArray(listRes?.jobs) ? listRes.jobs : [];
-    } catch (err) {
-      this.agentCronError = err instanceof Error ? err.message : "Không thể tải cron jobs";
-    } finally {
-      this.agentCronLoading = false;
-    }
+    await agents.loadAgentCron(this);
   }
 
-  // Skills handlers
+  // Skills handlers — delegate to app-agents-actions
   private async loadSkills() {
-    this.skillsLoading = true;
-    this.skillsError = null;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<SkillStatusReport>("skills.status", {});
-      if (res) this.skillsReport = res;
-    } catch (err) {
-      this.skillsError = err instanceof Error ? err.message : "Không thể tải skills";
-    } finally {
-      this.skillsLoading = false;
-    }
+    await agents.loadSkills(this);
   }
 
   private async handleSkillToggle(skillKey: string, currentDisabled: boolean) {
-    this.skillsBusyKey = skillKey;
-    try {
-      const client = await waitForConnection();
-      const enabled = currentDisabled; // if currently disabled, enable it
-      await client.request("skills.update", { skillKey, enabled });
-      showToast(enabled ? "Đã bật skill" : "Đã tắt skill", "success");
-      await this.loadSkills();
-    } catch (err) {
-      this.skillsMessages = {
-        ...this.skillsMessages,
-        [skillKey]: { kind: "error", message: err instanceof Error ? err.message : "Lỗi" },
-      };
-    } finally {
-      this.skillsBusyKey = null;
-    }
+    await agents.handleSkillToggle(this, skillKey, currentDisabled);
   }
 
   private handleSkillEdit(skillKey: string, value: string) {
-    this.skillsEdits = { ...this.skillsEdits, [skillKey]: value };
+    agents.handleSkillEdit(this, skillKey, value);
   }
 
   private async handleSkillSaveKey(skillKey: string) {
-    this.skillsBusyKey = skillKey;
-    try {
-      const client = await waitForConnection();
-      const apiKey = this.skillsEdits[skillKey] ?? "";
-      await client.request("skills.update", { skillKey, apiKey });
-      showToast("Đã lưu API key", "success");
-      this.skillsMessages = {
-        ...this.skillsMessages,
-        [skillKey]: { kind: "success", message: "Đã lưu" },
-      };
-      await this.loadSkills();
-    } catch (err) {
-      this.skillsMessages = {
-        ...this.skillsMessages,
-        [skillKey]: { kind: "error", message: err instanceof Error ? err.message : "Lỗi" },
-      };
-    } finally {
-      this.skillsBusyKey = null;
-    }
+    await agents.handleSkillSaveKey(this, skillKey);
   }
 
   private async handleSkillInstall(skillKey: string, name: string, installId: string) {
-    this.skillsBusyKey = skillKey;
-    try {
-      const client = await waitForConnection();
-      showToast(`Đang cài đặt ${name}...`, "info");
-      const res = await client.request<{ message?: string }>("skills.install", {
-        name,
-        installId,
-        timeoutMs: 120000,
-      });
-      await this.loadSkills();
-      this.skillsMessages = {
-        ...this.skillsMessages,
-        [skillKey]: { kind: "success", message: res?.message ?? "Đã cài đặt" },
-      };
-    } catch (err) {
-      this.skillsMessages = {
-        ...this.skillsMessages,
-        [skillKey]: { kind: "error", message: err instanceof Error ? err.message : "Lỗi cài đặt" },
-      };
-    } finally {
-      this.skillsBusyKey = null;
-    }
+    await agents.handleSkillInstall(this, skillKey, name, installId);
   }
 
-  // Nodes handlers
+  // Nodes / Config / Devices / Exec Approvals handlers — delegate to app-config-actions
   private async loadNodes() {
-    this.nodesLoading = true;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<{ nodes?: NodeInfo[] }>("node.list", {});
-      this.nodesList = Array.isArray(res?.nodes) ? res.nodes : [];
-    } catch (err) {
-      console.error("Failed to load nodes:", err);
-    } finally {
-      this.nodesLoading = false;
-    }
+    await config.loadNodes(this);
   }
 
   private async loadDevices() {
-    this.devicesLoading = true;
-    this.devicesError = null;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<{ pending?: PendingDevice[]; paired?: PairedDevice[] }>(
-        "device.pair.list",
-        {},
-      );
-      this.devicesList = {
-        pending: Array.isArray(res?.pending) ? res.pending : [],
-        paired: Array.isArray(res?.paired) ? res.paired : [],
-      };
-    } catch (err) {
-      this.devicesError = err instanceof Error ? err.message : "Không thể tải thiết bị";
-    } finally {
-      this.devicesLoading = false;
-    }
+    await config.loadDevices(this);
   }
 
   private async handleDeviceApprove(requestId: string) {
-    try {
-      const client = await waitForConnection();
-      await client.request("device.pair.approve", { requestId });
-      showToast("Đã chấp nhận thiết bị", "success");
-      await this.loadDevices();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Lỗi", "error");
-    }
+    await config.handleDeviceApprove(this, requestId);
   }
 
   private async handleDeviceReject(requestId: string) {
-    try {
-      const client = await waitForConnection();
-      await client.request("device.pair.reject", { requestId });
-      showToast("Đã từ chối thiết bị", "success");
-      await this.loadDevices();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Lỗi", "error");
-    }
+    await config.handleDeviceReject(this, requestId);
   }
 
   private async handleDeviceRotate(deviceId: string, role: string, scopes?: string[]) {
-    try {
-      const client = await waitForConnection();
-      await client.request("device.token.rotate", { deviceId, role, scopes });
-      showToast("Đã rotate token", "success");
-      await this.loadDevices();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Lỗi", "error");
-    }
+    await config.handleDeviceRotate(this, deviceId, role, scopes);
   }
 
   private async handleDeviceRevoke(deviceId: string, role: string) {
-    try {
-      const client = await waitForConnection();
-      await client.request("device.token.revoke", { deviceId, role });
-      showToast("Đã revoke token", "success");
-      await this.loadDevices();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Lỗi", "error");
-    }
+    await config.handleDeviceRevoke(this, deviceId, role);
   }
 
   private async loadConfig() {
-    this.configLoading = true;
-    try {
-      const client = await waitForConnection();
-      const res = await client.request<{ config: Record<string, unknown>; hash: string }>(
-        "config.get",
-        {},
-      );
-      if (res?.config) {
-        this.configSnapshot = { config: res.config, hash: res.hash ?? "" };
-        this.configForm = JSON.parse(JSON.stringify(res.config));
-        this.configDirty = false;
-      }
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Lỗi load config", "error");
-    } finally {
-      this.configLoading = false;
-    }
+    await config.loadConfig(this);
   }
 
-  private async handleBindDefault(nodeId: string | null) {
-    if (!this.configForm) return;
-    const form = JSON.parse(JSON.stringify(this.configForm));
-    if (!form.tools) form.tools = {};
-    if (!form.tools.exec) form.tools.exec = {};
-    if (nodeId) {
-      form.tools.exec.node = nodeId;
-    } else {
-      delete form.tools.exec.node;
-    }
-    this.configForm = form;
-    this.configDirty = true;
+  private handleBindDefault(nodeId: string | null) {
+    config.handleBindDefault(this, nodeId);
   }
 
-  private async handleBindAgent(agentIndex: number, nodeId: string | null) {
-    if (!this.configForm) return;
-    const form = JSON.parse(JSON.stringify(this.configForm));
-    if (!form.agents?.list?.[agentIndex]) return;
-    const agent = form.agents.list[agentIndex];
-    if (!agent.tools) agent.tools = {};
-    if (!agent.tools.exec) agent.tools.exec = {};
-    if (nodeId) {
-      agent.tools.exec.node = nodeId;
-    } else {
-      delete agent.tools.exec.node;
-    }
-    this.configForm = form;
-    this.configDirty = true;
+  private handleBindAgent(agentIndex: number, nodeId: string | null) {
+    config.handleBindAgent(this, agentIndex, nodeId);
   }
 
   private async handleSaveBindings() {
-    if (!this.configForm || !this.configSnapshot) return;
-    this.configSaving = true;
-    try {
-      const client = await waitForConnection();
-      await client.request("config.set", {
-        config: this.configForm,
-        baseHash: this.configSnapshot.hash,
-      });
-      showToast("Đã lưu bindings", "success");
-      this.configDirty = false;
-      await this.loadConfig();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Lỗi lưu bindings", "error");
-    } finally {
-      this.configSaving = false;
-    }
+    await config.handleSaveBindings(this);
   }
 
   private async loadExecApprovals() {
-    this.execApprovalsLoading = true;
-    try {
-      const client = await waitForConnection();
-      const target = this.execApprovalsTarget;
-      const nodeId = this.execApprovalsTargetNodeId;
-      const params: Record<string, unknown> = {};
-      if (target === "node" && nodeId) {
-        params.nodeId = nodeId;
-      }
-      const method = target === "node" ? "exec.approvals.node.get" : "exec.approvals.get";
-      const res = await client.request<import("./agent-types").ExecApprovalsSnapshot>(
-        method,
-        params,
-      );
-      this.execApprovalsSnapshot = res;
-      if (!this.execApprovalsDirty) {
-        this.execApprovalsForm = res?.file ? JSON.parse(JSON.stringify(res.file)) : null;
-      }
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Lỗi load exec approvals", "error");
-    } finally {
-      this.execApprovalsLoading = false;
-    }
+    await config.loadExecApprovals(this);
   }
 
-  private async handleExecApprovalsTargetChange(kind: "gateway" | "node", nodeId: string | null) {
-    this.execApprovalsTarget = kind;
-    this.execApprovalsTargetNodeId = nodeId;
-    this.execApprovalsSnapshot = null;
-    this.execApprovalsForm = null;
-    this.execApprovalsDirty = false;
+  private handleExecApprovalsTargetChange(kind: "gateway" | "node", nodeId: string | null) {
+    config.handleExecApprovalsTargetChange(this, kind, nodeId);
   }
 
-  private async handleExecApprovalsSelectAgent(agentId: string) {
-    this.execApprovalsSelectedAgent = agentId;
+  private handleExecApprovalsSelectAgent(agentId: string) {
+    config.handleExecApprovalsSelectAgent(this, agentId);
   }
 
-  private async handleExecApprovalsPatch(path: Array<string | number>, value: unknown) {
-    const form = this.execApprovalsForm ?? this.execApprovalsSnapshot?.file ?? {};
-    const updated = JSON.parse(JSON.stringify(form));
-    let current: any = updated;
-    for (let i = 0; i < path.length - 1; i++) {
-      const key = path[i];
-      if (!(key in current)) {
-        current[key] = typeof path[i + 1] === "number" ? [] : {};
-      }
-      current = current[key];
-    }
-    const lastKey = path[path.length - 1];
-    current[lastKey] = value;
-    this.execApprovalsForm = updated;
-    this.execApprovalsDirty = true;
+  private handleExecApprovalsPatch(path: Array<string | number>, value: unknown) {
+    config.handleExecApprovalsPatch(this, path, value);
   }
 
-  private async handleExecApprovalsRemove(path: Array<string | number>) {
-    const form = this.execApprovalsForm ?? this.execApprovalsSnapshot?.file ?? {};
-    const updated = JSON.parse(JSON.stringify(form));
-    let current: any = updated;
-    for (let i = 0; i < path.length - 1; i++) {
-      const key = path[i];
-      if (!(key in current)) return;
-      current = current[key];
-    }
-    const lastKey = path[path.length - 1];
-    if (Array.isArray(current)) {
-      current.splice(Number(lastKey), 1);
-    } else {
-      delete current[lastKey];
-    }
-    this.execApprovalsForm = updated;
-    this.execApprovalsDirty = true;
+  private handleExecApprovalsRemove(path: Array<string | number>) {
+    config.handleExecApprovalsRemove(this, path);
   }
 
   private async handleSaveExecApprovals() {
-    if (!this.execApprovalsForm || !this.execApprovalsSnapshot) return;
-    this.execApprovalsSaving = true;
-    try {
-      const client = await waitForConnection();
-      const target = this.execApprovalsTarget;
-      const nodeId = this.execApprovalsTargetNodeId;
-      const params: Record<string, unknown> = {
-        file: this.execApprovalsForm,
-        baseHash: this.execApprovalsSnapshot.hash,
-      };
-      if (target === "node" && nodeId) {
-        params.nodeId = nodeId;
-      }
-      const method = target === "node" ? "exec.approvals.node.set" : "exec.approvals.set";
-      await client.request(method, params);
-      showToast("Đã lưu exec approvals", "success");
-      this.execApprovalsDirty = false;
-      await this.loadExecApprovals();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Lỗi lưu exec approvals", "error");
-    } finally {
-      this.execApprovalsSaving = false;
-    }
+    await config.handleSaveExecApprovals(this);
   }
 
-  // Analytics handlers
+  // Analytics handlers — delegate to app-analytics-actions
   private async loadAnalytics() {
-    this.analyticsLoading = true;
-    this.analyticsError = null;
-    try {
-      let result;
-      if (this.analyticsPeriod === "custom") {
-        if (!this.analyticsRangeStart || !this.analyticsRangeEnd) return;
-        result = await getRangeUsage(this.analyticsRangeStart, this.analyticsRangeEnd);
-      } else {
-        const days =
-          this.analyticsPeriod === "1d"
-            ? 1
-            : this.analyticsPeriod === "7d"
-              ? 7
-              : this.analyticsPeriod === "30d"
-                ? 30
-                : 90;
-        result = await getDailyUsage(days);
-      }
-
-      this.analyticsStats = transformStats(result.stats);
-      this.analyticsDailyUsage = transformDailyUsage(result.daily);
-      this.analyticsTypeUsage = transformTypeUsage(result.byType);
-    } catch (err) {
-      this.analyticsError = err instanceof Error ? err.message : "Không thể tải dữ liệu analytics";
-    } finally {
-      this.analyticsLoading = false;
-    }
+    await analytics.loadAnalytics(this);
   }
 
   private handleAnalyticsPeriodChange(period: "1d" | "7d" | "30d" | "90d" | "custom") {
-    this.analyticsPeriod = period;
-    if (period !== "custom") this.loadAnalytics();
+    analytics.handleAnalyticsPeriodChange(this, period);
   }
 
   private handleAnalyticsRangeChange(start: string, end: string) {
-    this.analyticsRangeStart = start;
-    this.analyticsRangeEnd = end;
-    if (start && end) this.loadAnalytics();
+    analytics.handleAnalyticsRangeChange(this, start, end);
   }
 
   // ── Sessions handlers ─────────────────────────────────────────────────
 
   private async loadSessionsList() {
-    this.sessionsLoading = true;
-    this.sessionsError = null;
-    try {
-      const gw = await waitForConnection(5000);
-      const result = await gw.request<any>("sessions.list", {
-        activeMinutes: this.sessionsActiveMinutes ? Number(this.sessionsActiveMinutes) : 525600,
-        limit: Number(this.sessionsLimit) || 120,
-        includeGlobal: this.sessionsIncludeGlobal,
-        includeUnknown: this.sessionsIncludeUnknown,
-      });
-      this.sessionsResult = result;
-    } catch (err) {
-      this.sessionsError = err instanceof Error ? err.message : String(err);
-    } finally {
-      this.sessionsLoading = false;
-    }
+    await analytics.loadSessionsList(this);
   }
 
   private async handleSessionsPatch(
@@ -3401,64 +1854,36 @@ export class OperisApp extends LitElement {
       reasoningLevel?: string | null;
     },
   ) {
-    try {
-      const gw = await waitForConnection(5000);
-      await gw.request("sessions.patch", { key, ...patch });
-      this.loadSessionsList();
-    } catch (err) {
-      console.error("[sessions] patch failed:", err);
-      showToast("Failed to patch session", "error");
-    }
+    await analytics.handleSessionsPatch(this, key, patch);
+  }
+
+  private async loadAvailableModels() {
+    await analytics.loadAvailableModels(this);
+  }
+
+  private async handleThinkingChange(level: string) {
+    this.chatThinkingLevel = level;
+    const key = this.normalizeSessionKey(this.chatConversationId || "main");
+    await this.handleSessionsPatch(key, { thinkingLevel: level === "off" ? null : level });
+  }
+
+  private async handleModelChange(modelId: string) {
+    await analytics.handleModelChange(this, modelId);
+    this.loadGatewaySessions();
   }
 
   private async handleSessionsDelete(key: string) {
-    const confirmed = await showConfirm({
-      title: `Delete session "${key}"?`,
-      message: "This action cannot be undone.",
-      variant: "danger",
-    });
-    if (!confirmed) return;
-    try {
-      const gw = await waitForConnection(5000);
-      await gw.request("sessions.delete", { key });
-      this.loadSessionsList();
-    } catch (err) {
-      console.error("[sessions] delete failed:", err);
-      showToast("Failed to delete session", "error");
-    }
+    await analytics.handleSessionsDelete(this, key);
   }
 
   // ── Report handlers ──────────────────────────────────────────────────
 
   private async loadReports() {
-    this.reportLoading = true;
-    this.reportError = null;
-    try {
-      const isAdmin = this.currentUser?.role === "admin";
-      const result = isAdmin ? await getAllReports() : await getMyReports();
-      this.reports = result.reports;
-    } catch (err) {
-      this.reportError = err instanceof Error ? err.message : "Không thể tải góp ý";
-    } finally {
-      this.reportLoading = false;
-    }
+    await analytics.loadReports(this);
   }
 
   private async handleReportSubmit() {
-    const { type, subject, content } = this.reportForm;
-    if (!subject.trim() || !content.trim()) return;
-
-    this.reportSubmitting = true;
-    try {
-      await createReport(type, subject, content);
-      showToast("Cảm ơn bạn đã đóng góp ý kiến!", "success");
-      this.reportForm = { type: "bug", subject: "", content: "" };
-      await this.loadReports();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Gửi góp ý thất bại", "error");
-    } finally {
-      this.reportSubmitting = false;
-    }
+    await analytics.handleReportSubmit(this);
   }
 
   private handleThemeClick(mode: ThemeMode, event: MouseEvent) {
@@ -3629,42 +2054,113 @@ export class OperisApp extends LitElement {
 
   private renderContent() {
     switch (this.tab) {
-      case "chat":
-        return renderChat({
-          messages: this.chatMessages,
-          draft: this.chatDraft,
-          sending: this.chatSending || Boolean(this.chatRunId),
-          loading: this.chatInitializing,
-          isLoggedIn: this.settings.isLoggedIn,
-          username: this.settings.username ?? undefined,
-          botName: "Operis",
-          streamingText: this.chatStreamingText,
-          toolCalls: this.chatToolCalls,
-          pendingImages: this.chatPendingImages,
-          gatewayReady: this.gatewayStatus === "running" || this.gatewayStatus === "unknown",
-          onDraftChange: (value) => (this.chatDraft = value),
-          onSend: () => this.handleSendMessage(),
-          onStop: () => this.handleStopChat(),
-          onLoginClick: () => this.setTab("login"),
-          onImageSelect: (files) => this.handleImageSelect(files),
-          onImageRemove: (index) => this.handleImageRemove(index),
-          // Sidebar props
-          conversations: this.chatConversations,
-          conversationsLoading: this.chatConversationsLoading,
-          currentConversationId: this.chatConversationId,
-          sidebarCollapsed: this.settings.chatSidebarCollapsed,
-          onToggleSidebar: () => this.toggleChatSidebar(),
-          onNewConversation: () => this.handleNewConversation(),
-          onSwitchConversation: (id: string) => this.handleSwitchConversation(id),
-          onDeleteConversation: (id: string) => this.handleDeleteConversation(id),
-          onRefreshChat: () => this.handleRefreshChat(),
-          compactionActive: this.chatCompactionActive,
-          queue: this.chatQueue,
-          onQueueRemove: (id: string) => this.removeQueuedMessage(id),
-          sessionKey: this.normalizeSessionKey(this.chatConversationId || "main"),
-          gatewaySessions: this.gatewaySessions,
-          onSessionChange: (key: string) => this.handleSessionChange(key),
-        });
+      case "chat": {
+        // Convert flat tool calls to openclaw2 message format for extractToolCards
+        const toolMessages = (this.chatToolCalls ?? []).map((tc) => ({
+          role: tc.phase === "result" ? "toolResult" : "assistant",
+          content:
+            tc.phase === "result"
+              ? [{ type: "tool_result", name: tc.name, text: tc.output ?? "" }]
+              : [{ type: "tool_call", name: tc.name, arguments: { command: tc.detail } }],
+          timestamp: Date.now(),
+        }));
+        // Build sessions list from gatewaySessions for the session selector
+        const chatSessions: import("./types").SessionsListResult = {
+          ts: Date.now(),
+          path: "",
+          count: this.gatewaySessions.length,
+          defaults: { model: null, contextTokens: null },
+          sessions: this.gatewaySessions as import("./types").GatewaySessionRow[],
+        };
+        const chatSessionKey = this.normalizeSessionKey(this.chatConversationId || "main");
+        return html`
+          <div class="chat-controls">
+            <label class="chat-controls__session">
+              <select
+                .value=${chatSessionKey}
+                ?disabled=${this.gatewayStatus !== "running" && this.gatewayStatus !== "unknown"}
+                @change=${(e: Event) => {
+                  const next = (e.target as HTMLSelectElement).value;
+                  this.handleSessionChange(next);
+                }}
+              >
+                ${
+                  this.gatewaySessions.length === 0
+                    ? html`<option value=${chatSessionKey} selected>Main session</option>`
+                    : this.gatewaySessions.map(
+                        (s) => html`<option value=${s.key} ?selected=${s.key === chatSessionKey}>
+                        ${s.displayName ?? s.derivedTitle ?? this.shortSessionKey(s.key)}
+                      </option>`,
+                      )
+                }
+              </select>
+            </label>
+            <button
+              class="btn btn--sm btn--icon"
+              ?disabled=${this.chatSending}
+              @click=${() => this.handleRefreshChat()}
+              title="Refresh chat"
+            >
+              ${icons.refresh}
+            </button>
+            <button
+              class="btn btn--sm btn--icon"
+              @click=${() => this.handleNewConversation()}
+              title="New session"
+            >
+              ${icons.plus}
+            </button>
+          </div>
+          ${renderChat({
+            sessionKey: chatSessionKey,
+            onSessionKeyChange: (key: string) => this.handleSessionChange(key),
+            thinkingLevel: null,
+            showThinking: true,
+            loading: false,
+            sending: this.chatSending,
+            canAbort: this.chatSending || Boolean(this.chatRunId),
+            messages: this.chatMessages,
+            toolMessages,
+            stream: this.chatSending
+              ? (this.chatStreamingText ?? "")
+              : this.chatStreamingText || null,
+            streamStartedAt: this.chatSending ? Date.now() : null,
+            draft: this.chatDraft,
+            queue: this.chatQueue.map((q) => ({
+              id: q.id,
+              text: q.text,
+              createdAt: q.createdAt ?? Date.now(),
+            })),
+            connected: this.gatewayStatus === "running" || this.gatewayStatus === "unknown",
+            canSend: true,
+            disabledReason: null,
+            error: null,
+            sessions: chatSessions,
+            focusMode: false,
+            assistantName: "Operis",
+            assistantAvatar: null,
+            onRefresh: () => this.handleRefreshChat(),
+            onToggleFocusMode: () => {},
+            onDraftChange: (value) => (this.chatDraft = value),
+            onSend: () => this.handleSendMessage(),
+            onAbort: () => this.handleStopChat(),
+            onQueueRemove: (id: string) => this.removeQueuedMessage(id),
+            onNewSession: () => this.handleNewConversation(),
+            onChatScroll: (e: Event) => {
+              const el = e.target as HTMLElement;
+              this.chatAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+            },
+            onScrollToBottom: this.chatAtBottom ? undefined : () => this.scrollChatToBottom(),
+            attachments: this.chatAttachments,
+            onAttachmentsChange: (atts) => {
+              this.chatAttachments = atts;
+            },
+            compactionStatus: this.chatCompactionActive
+              ? { active: true, startedAt: Date.now(), completedAt: null }
+              : null,
+          })}
+        `;
+      }
       case "analytics":
         return renderAnalytics({
           loading: this.analyticsLoading,
@@ -3779,10 +2275,13 @@ export class OperisApp extends LitElement {
           onCancel: (w) => this.handleWorkflowCancel(w),
           onEdit: (w) => this.handleWorkflowEdit(w),
           onDelete: (w) => this.handleWorkflowDelete(w),
-          onToggleDetails: (id: string) => {
-            this.workflowExpandedId = this.workflowExpandedId === id ? null : id;
+          detailWorkflow: this.workflowDetailWorkflow,
+          onOpenWorkflowDetail: (w) => {
+            this.workflowDetailWorkflow = w;
           },
-          expandedWorkflowId: this.workflowExpandedId,
+          onCloseWorkflowDetail: () => {
+            this.workflowDetailWorkflow = null;
+          },
           runningWorkflowIds: this.runningWorkflowIds,
           // Split panel
           selectedWorkflowId: this.selectedWorkflowId,
@@ -3952,6 +2451,9 @@ export class OperisApp extends LitElement {
           onModelFallbacksChange: (agentId: string, fallbacks: string[]) =>
             this.handleAgentModelFallbacksChange(agentId, fallbacks),
           onChannelsRefresh: () => this.loadAgentChannels(),
+          onAddBinding: (agentId: string, channelId: string, accountId?: string) =>
+            this.handleAddBinding(agentId, channelId, accountId),
+          onRemoveBinding: (bindingIndex: number) => this.handleRemoveBinding(bindingIndex),
           onCronRefresh: () => this.loadAgentCron(),
           onSkillsFilterChange: (next: string) => {
             this.agentSkillsFilter = next;
@@ -4046,6 +2548,10 @@ export class OperisApp extends LitElement {
           includeGlobal: this.sessionsIncludeGlobal,
           includeUnknown: this.sessionsIncludeUnknown,
           basePath: "",
+          agents: (this.agentsList?.agents ?? []).map((a) => ({
+            id: a.id,
+            name: a.name || a.id,
+          })),
           onFiltersChange: (next) => {
             this.sessionsActiveMinutes = next.activeMinutes;
             this.sessionsLimit = next.limit;
@@ -4057,14 +2563,12 @@ export class OperisApp extends LitElement {
           onPatch: (key, patch) => this.handleSessionsPatch(key, patch),
           onDelete: (key) => this.handleSessionsDelete(key),
           onOpenSession: (key) => {
-            const fullKey = this.normalizeSessionKey(key);
-            this.chatConversationId = fullKey === "agent:main:main" ? null : fullKey;
-            this.chatMessages = [];
-            this.chatStreamingText = "";
-            this.chatToolCalls = [];
-            this.chatInitializing = true;
-            this.persistSessionKey(fullKey);
             this.setTab("chat");
+            void this.handleSessionChange(key);
+          },
+          onCreateSession: (key) => {
+            this.setTab("chat");
+            void this.handleSessionChange(key);
           },
         });
       default:
@@ -4159,7 +2663,7 @@ export class OperisApp extends LitElement {
 
         <main class="content ${this.tab === "login" ? "content--no-scroll" : ""}">
           ${
-            this.tab !== "login"
+            this.tab !== "login" && this.tab !== "chat"
               ? html`
                 <section class="content-header">
                   <div>
@@ -4241,7 +2745,9 @@ export class OperisApp extends LitElement {
             placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
             .value=${this.telegramTokenValue}
             @input=${(e: Event) => (this.telegramTokenValue = (e.target as HTMLInputElement).value)}
-            @keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" && !this.telegramTokenSaving) this.handleTelegramTokenSave(); }}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key === "Enter" && !this.telegramTokenSaving) this.handleTelegramTokenSave();
+            }}
             ?disabled=${this.telegramTokenSaving}
           />
           ${this.telegramTokenError ? html`<p class="tg-error-msg">${this.telegramTokenError}</p>` : nothing}

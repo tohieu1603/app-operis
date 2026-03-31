@@ -33,6 +33,27 @@ const ALLOWED_CLICK_MODIFIERS = new Set<ClickModifier>([
   "Shift",
 ]);
 
+export function invalidKindMessage(received: string): string {
+  return [
+    received
+      ? `Invalid action kind: "${received}". Valid kinds: ${ACT_KINDS.join(", ")}.`
+      : `"kind" is required. Valid kinds: ${ACT_KINDS.join(", ")}.`,
+    "",
+    "Example: POST /act",
+    '  { "kind": "click", "ref": "e5" }',
+  ].join("\n");
+}
+
+export function missingRefMessage(kind: string): string {
+  return [
+    `"ref" is required for kind "${kind}".`,
+    "",
+    `Example: { "kind": "${kind}", "ref": "e5" }`,
+    "",
+    "Get refs by calling GET /snapshot first.",
+  ].join("\n");
+}
+
 export function parseClickButton(raw: string): ClickButton | undefined {
   if (raw === "left" || raw === "right" || raw === "middle") {
     return raw;

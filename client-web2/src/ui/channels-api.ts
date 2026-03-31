@@ -108,8 +108,9 @@ export async function waitZaloQrLogin(params?: {
   timeoutMs?: number;
 }): Promise<{ connected: boolean; message: string }> {
   const gw = await waitForConnection(5000);
+  const serverTimeout = params?.timeoutMs ?? 120_000;
   return gw.request<{ connected: boolean; message: string }>("web.login.wait", {
-    timeoutMs: params?.timeoutMs ?? 120_000,
+    timeoutMs: serverTimeout,
   });
 }
 

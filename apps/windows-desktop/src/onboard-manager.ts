@@ -8,6 +8,29 @@
 import path from "node:path";
 import fs from "node:fs";
 
+/**
+ * Recursively resolve env var placeholders in JSON values.
+ * Strings starting with "$" (e.g. "$ANTHROPIC_API_KEY") are replaced
+ * with the corresponding environment variable value, or kept as-is if unset.
+ */
+function resolveEnvPlaceholders(obj: unknown): unknown {
+  if (typeof obj === "string" && obj.startsWith("$")) {
+    const envName = obj.slice(1);
+    return process.env[envName] || obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(resolveEnvPlaceholders);
+  }
+  if (obj !== null && typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      result[k] = resolveEnvPlaceholders(v);
+    }
+    return result;
+  }
+  return obj;
+}
+
 export class OnboardManager {
   private readonly stateDir: string;
 
@@ -86,7 +109,6 @@ export class OnboardManager {
       channels: {
         telegram: {
           dmPolicy: "open",
-          botToken: "",
           allowFrom: ["*"],
           groupPolicy: "allowlist",
           streamMode: "partial",
@@ -114,7 +136,7 @@ export class OnboardManager {
   applyPreset(presetPath: string): void {
     try {
       const presetRaw = fs.readFileSync(presetPath, "utf-8");
-      const preset = JSON.parse(presetRaw);
+      const preset = resolveEnvPlaceholders(JSON.parse(presetRaw)) as Record<string, unknown>;
       const configRaw = fs.readFileSync(this.configFilePath, "utf-8");
       const config = JSON.parse(configRaw);
 
@@ -133,7 +155,7 @@ export class OnboardManager {
   ensurePresetDefaults(presetPath: string): void {
     try {
       const presetRaw = fs.readFileSync(presetPath, "utf-8");
-      const preset = JSON.parse(presetRaw);
+      const preset = resolveEnvPlaceholders(JSON.parse(presetRaw)) as Record<string, unknown>;
       const configRaw = fs.readFileSync(this.configFilePath, "utf-8");
       const config = JSON.parse(configRaw);
 
@@ -232,6 +254,54 @@ export class OnboardManager {
   }
 
   /**
+   * Force-apply models and agents sections from the bundled preset.
+   * Unlike ensurePresetDefaults (which only fills missing keys), this
+   * overwrites providers/models/agents so existing configs always match
+   * the bundled edition (operis vs claude).
+   */
+  forceApplyPresetModels(presetPath: string): void {
+    try {
+      const presetRaw = fs.readFileSync(presetPath, "utf-8");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const preset = resolveEnvPlaceholders(JSON.parse(presetRaw)) as any;
+      const configRaw = fs.readFileSync(this.configFilePath, "utf-8");
+      const config = JSON.parse(configRaw);
+
+      let modified = false;
+
+      if (preset.models?.providers) {
+        config.models ??= {};
+        if (JSON.stringify(config.models.providers) !== JSON.stringify(preset.models.providers)) {
+          config.models.providers = preset.models.providers;
+          modified = true;
+        }
+      }
+
+      if (preset.agents?.defaults) {
+        config.agents ??= {};
+        if (JSON.stringify(config.agents.defaults) !== JSON.stringify(preset.agents.defaults)) {
+          config.agents.defaults = preset.agents.defaults;
+          modified = true;
+        }
+      }
+
+      if (preset.agents?.list) {
+        config.agents ??= {};
+        if (JSON.stringify(config.agents.list) !== JSON.stringify(preset.agents.list)) {
+          config.agents.list = preset.agents.list;
+          modified = true;
+        }
+      }
+
+      if (modified) {
+        fs.writeFileSync(this.configFilePath, JSON.stringify(config, null, 2), "utf-8");
+      }
+    } catch (err) {
+      console.error("[onboard] Failed to force-apply preset models:", err);
+    }
+  }
+
+  /**
    * Ensure gateway config has Electron-specific settings (idempotent).
    * Called after onboard and on every app startup.
    */
@@ -322,14 +392,10 @@ export class OnboardManager {
       // Enable channels (telegram + zalozcajs)
       config.channels ??= {};
 
-      // Telegram channel defaults (user fills botToken in settings)
+      // Telegram channel defaults (user fills botToken via settings modal)
       config.channels.telegram ??= {};
       if (!config.channels.telegram.dmPolicy) {
         config.channels.telegram.dmPolicy = "open";
-        modified = true;
-      }
-      if (config.channels.telegram.botToken === undefined) {
-        config.channels.telegram.botToken = "";
         modified = true;
       }
       if (!config.channels.telegram.allowFrom) {

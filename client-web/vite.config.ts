@@ -23,8 +23,6 @@ export default defineConfig(() => {
   const envBase = process.env.CLIENT_WEB_BASE_PATH?.trim();
   const base = envBase ? normalizeBase(envBase) : "./";
 
-  // Map root GATEWAY_TOKEN to VITE_GATEWAY_TOKEN for client
-  const gatewayToken = process.env.VITE_GATEWAY_TOKEN || process.env.GATEWAY_TOKEN || "";
   const port = parseInt(process.env.CLIENT_WEB_PORT || "5173", 10);
   const apiTarget = process.env.CLIENT_WEB_API_TARGET || "http://127.0.0.1:18789";
 
@@ -32,9 +30,7 @@ export default defineConfig(() => {
     base,
     publicDir: path.resolve(here, "public"),
     plugins: [],
-    define: {
-      "import.meta.env.VITE_GATEWAY_TOKEN": JSON.stringify(gatewayToken),
-    },
+    define: {},
     optimizeDeps: {
       include: ["lit/directives/repeat.js"],
     },

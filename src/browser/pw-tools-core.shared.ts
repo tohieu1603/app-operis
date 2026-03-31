@@ -66,5 +66,16 @@ export function toAIFriendlyError(error: unknown, selector: string): Error {
     );
   }
 
+  if (
+    message.includes("Element is not attached") ||
+    message.includes("frame was detached") ||
+    message.includes("execution context was destroyed")
+  ) {
+    return new Error(
+      `Element "${selector}" was detached (page navigated or updated). ` +
+        `Run a new snapshot to get fresh refs.`,
+    );
+  }
+
   return error instanceof Error ? error : new Error(message);
 }
